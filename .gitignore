@@ -205,3 +205,25 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ============================================================
+# DeepFakeDetection — Project-specific ignores
+# ============================================================
+
+# Raw / extracted data (too large for VCS)
+data/
+!data/.gitkeep
+
+# Generated outputs (figures, CSVs, etc.)
+outputs/
+!outputs/**/.gitkeep
+
+# Model checkpoints
+checkpoints/
+*.pth
+*.pt
+*.onnx
+
+# Wandb / Tensorboard logs
+wandb/
+runs/
