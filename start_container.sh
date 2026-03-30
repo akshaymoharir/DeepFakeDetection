@@ -25,17 +25,35 @@ TENSORBOARD=false
 
 for arg in "$@"; do
     case $arg in
+        -h|--help)
+            echo "Usage: ./start_container.sh [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  -h, --help       Show this help message and exit"
+            echo "  --build          Rebuild Docker image before starting"
+            echo "  --jupyter        Start with Jupyter Lab"
+            echo "  --tensorboard    Start TensorBoard"
+            exit 0
+            ;;
         --build)       BUILD=true ;;
         --jupyter)     JUPYTER=true ;;
         --tensorboard) TENSORBOARD=true ;;
-        *)             echo "Unknown flag: $arg"; exit 1 ;;
+        *)
+            echo "Unknown flag: $arg"
+            echo "Usage: $0 [--build] [--jupyter] [--tensorboard] [-h|--help]"
+            exit 1
+            ;;
     esac
 done
 
 # ---- Build if requested or image doesn't exist ----
 if $BUILD || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     echo "🔨 Building Docker image: $IMAGE_NAME"
-    docker build -t "$IMAGE_NAME" "$PROJECT_DIR"
+    docker build \
+        --build-arg UNAME="$(id -un)" \
+        --build-arg UID="$(id -u)" \
+        --build-arg GID="$(id -g)" \
+        -t "$IMAGE_NAME" "$PROJECT_DIR"
 fi
 
 # ---- Stop existing container if running ----
@@ -74,7 +92,9 @@ docker run \
     --name "$CONTAINER_NAME" \
     --rm \
     -it \
+    --user "$(id -u):$(id -g)" \
     --shm-size=8g \
+    -v "$HOME":"$HOME" \
     -v "$PROJECT_DIR":/workspace \
     -v "$DATA_DIR":/workspace/data \
     -v "$PROJECT_DIR/outputs":/workspace/outputs \

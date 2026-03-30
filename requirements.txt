@@ -29,3 +29,7 @@ scipy>=1.11.0                      # FFT, DCT operations
 
 # Reproducibility
 python-dotenv>=1.0.0
+
+# NumPy: pin to <2 — the PyTorch NGC build (2.6.0a0) was compiled
+# against NumPy 1.x and crashes at import with NumPy 2.x.
+numpy<2

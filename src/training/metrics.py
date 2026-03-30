@@ -1,0 +1,102 @@
+"""
+src/training/metrics.py — Evaluation Metrics
+=============================================
+
+Wraps sklearn to compute frame-level binary classification metrics
+at the end of each train / val / test epoch.
+
+Metrics
+-------
+roc_auc      Primary checkpointing metric (area under ROC curve).
+f1           F1 score at threshold 0.5.
+precision    Precision at threshold 0.5.
+recall       Recall at threshold 0.5.
+accuracy     Accuracy at threshold 0.5.
+"""
+
+import numpy as np
+from sklearn.metrics import (
+    roc_auc_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    accuracy_score,
+)
+
+
+def compute_metrics(
+    all_labels: np.ndarray,
+    all_probs: np.ndarray,
+    threshold: float = 0.5,
+) -> dict:
+    """Compute binary classification metrics.
+
+    Parameters
+    ----------
+    all_labels : (N,) int/float array — ground truth (0=real, 1=fake)
+    all_probs  : (N,) float array    — predicted probabilities P(fake)
+    threshold  : float               — decision boundary
+
+    Returns
+    -------
+    dict with keys: roc_auc, f1, precision, recall, accuracy
+    """
+    labels = np.asarray(all_labels, dtype=int)
+    probs  = np.asarray(all_probs,  dtype=float)
+    # Guard against any residual NaN / Inf
+    probs  = np.nan_to_num(probs, nan=0.5, posinf=1.0, neginf=0.0)
+    preds  = (probs >= threshold).astype(int)
+
+    # ROC-AUC requires at least one sample of each class
+    n_classes = len(np.unique(labels))
+    if n_classes < 2:
+        roc_auc = float("nan")
+    else:
+        roc_auc = float(roc_auc_score(labels, probs))
+
+    return {
+        "roc_auc":   roc_auc,
+        "f1":        float(f1_score(labels, preds, zero_division=0)),
+        "precision": float(precision_score(labels, preds, zero_division=0)),
+        "recall":    float(recall_score(labels, preds, zero_division=0)),
+        "accuracy":  float(accuracy_score(labels, preds)),
+    }
+
+
+class MetricAccumulator:
+    """Accumulate logits and labels across mini-batches, compute at epoch end.
+
+    Usage
+    -----
+        acc = MetricAccumulator()
+        for logits, labels in loader:
+            acc.update(logits, labels)
+        results = acc.compute()
+    """
+
+    def __init__(self):
+        self._labels: list = []
+        self._probs:  list = []
+
+    def update(self, logits: "torch.Tensor", labels: "torch.Tensor") -> None:
+        import torch
+        with torch.no_grad():
+            # Clamp logits to prevent NaN from very large values in early epochs
+            logits_clamped = logits.detach().cpu().float().clamp(-50.0, 50.0)
+            probs = torch.sigmoid(logits_clamped).view(-1)
+            self._probs.extend(probs.numpy().tolist())
+            self._labels.extend(labels.detach().cpu().view(-1).numpy().tolist())
+
+    def compute(self, threshold: float = 0.5) -> dict:
+        return compute_metrics(
+            np.array(self._labels),
+            np.array(self._probs),
+            threshold=threshold,
+        )
+
+    def reset(self) -> None:
+        self._labels.clear()
+        self._probs.clear()
+
+    def __len__(self) -> int:
+        return len(self._labels)

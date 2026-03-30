@@ -1,0 +1,60 @@
+# ============================================================
+# Train Configuration — HSF-CVIT DeepFake Detection
+# ============================================================
+# Switch data.config to dataset_config.yaml once FF++ is ready.
+# All paths are relative to the project root.
+
+# ------ Model ------
+model:
+  name: hsf_cvit
+  pretrained_spatial: true          # download ImageNet weights for EfficientNet-B4
+  freeze_spatial_epochs: 2          # freeze EfficientNet-B4 for first N epochs (warm up freq branch)
+  spatial_out_dim: 512              # projection dim from spatial branch
+  freq_out_dim: 256                 # projection dim from frequency branch
+  fusion_heads: 4                   # cross-attention heads
+  fusion_dim: 256                   # internal transformer dim
+  dropout: 0.3
+
+# ------ Data ------
+data:
+  # Switch to dataset_config.yaml once FaceForensics++ download finishes
+  config: configs/dataset_config_dummy.yaml
+  frames_per_clip: 8                # frames sampled per video per epoch
+  image_size: 224
+  num_workers: 4
+  pin_memory: true
+  # FF++ manipulation methods to include (subset or all 4)
+  methods:
+    - Deepfakes
+    - Face2Face
+    - FaceSwap
+    - NeuralTextures
+
+# ------ Training ------
+training:
+  epochs: 50
+  batch_size: 16
+  optimizer: adamw                  # adamw | adam | sgd
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  warmup_epochs: 5
+  lr_schedule: cosine               # cosine | step | plateau
+  gradient_clip: 1.0
+  label_smoothing: 0.1
+  amp: true                         # mixed-precision (fp16) — requires CUDA
+
+# ------ Checkpoints ------
+checkpoints:
+  dir: outputs/checkpoints
+  save_every: 5                     # epochs between periodic saves
+  early_stop_patience: 10           # stop if val AUC doesn't improve for N epochs
+  keep_last: 3                      # keep only the last N periodic checkpoints
+
+# ------ Logging ------
+logging:
+  tensorboard_dir: outputs/runs
+  log_interval: 10                  # log metrics every N batches
+  csv_log: outputs/training_log.csv
+
+# ------ Reproducibility ------
+seed: 42

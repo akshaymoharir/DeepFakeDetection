@@ -20,9 +20,22 @@ VERBOSE=false
 
 for arg in "$@"; do
     case $arg in
+        -h|--help)
+            echo "Usage: ./build_image.sh [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  -h, --help    Show this help message and exit"
+            echo "  --no-cache    Rebuild from scratch (do not use docker cache)"
+            echo "  --verbose     Show full docker build output"
+            exit 0
+            ;;
         --no-cache) NO_CACHE="--no-cache" ;;
         --verbose)  VERBOSE=true ;;
-        *)          echo "Unknown flag: $arg"; echo "Usage: $0 [--no-cache] [--verbose]"; exit 1 ;;
+        *)
+            echo "Unknown flag: $arg"
+            echo "Usage: $0 [--no-cache] [--verbose] [-h|--help]"
+            exit 1
+            ;;
     esac
 done
 
@@ -69,12 +82,18 @@ START_TIME=$(date +%s)
 if $VERBOSE; then
     docker build \
         $NO_CACHE \
+        --build-arg UNAME="$(id -un)" \
+        --build-arg UID="$(id -u)" \
+        --build-arg GID="$(id -g)" \
         -t "${IMAGE_NAME}:${TAG}" \
         -f "${PROJECT_DIR}/Dockerfile" \
         "${PROJECT_DIR}"
 else
     docker build \
         $NO_CACHE \
+        --build-arg UNAME="$(id -un)" \
+        --build-arg UID="$(id -u)" \
+        --build-arg GID="$(id -g)" \
         -t "${IMAGE_NAME}:${TAG}" \
         -f "${PROJECT_DIR}/Dockerfile" \
         "${PROJECT_DIR}" 2>&1 | while IFS= read -r line; do
