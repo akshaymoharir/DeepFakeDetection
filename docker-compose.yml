@@ -1,0 +1,58 @@
+# =============================================================
+# docker-compose.yml — DeepFakeDetection
+# =============================================================
+# Usage:
+#   docker compose up -d        # start container in background
+#   docker compose exec dev bash  # shell into running container
+#   docker compose down          # stop and remove
+# =============================================================
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: deepfake-detect:latest
+    container_name: deepfake-dev
+
+    # ---- GPU access ----
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1              # use 1 GPU (RTX 3090)
+              capabilities: [gpu]
+
+    # ---- Volumes ----
+    volumes:
+      # Mount project root → /workspace  (live code editing)
+      - .:/workspace
+
+      # Mount dataset directory separately (keeps data outside git)
+      # Adjust the host path to wherever your datasets live
+      - ${DATA_DIR:-./data}:/workspace/data
+
+      # Persist outputs across container restarts
+      - ./outputs:/workspace/outputs
+
+    # ---- Networking ----
+    ports:
+      - "6006:6006"     # TensorBoard
+      - "8888:8888"     # Jupyter (optional)
+
+    # ---- Environment ----
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONNOUSERSITE=1
+
+    # ---- Keep alive ----
+    stdin_open: true      # -i
+    tty: true             # -t
+    working_dir: /workspace
+
+    # Shared memory — critical for PyTorch DataLoader num_workers > 0
+    shm_size: "8g"
+
+    command: /bin/bash

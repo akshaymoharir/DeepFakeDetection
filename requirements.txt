@@ -1,0 +1,35 @@
+# DeepFake Detection - Project Dependencies
+# ============================================
+# NOTE: torch, torchvision, numpy, Pillow, tensorboard
+#       are pre-installed in the NGC base image.
+#       Do NOT re-list them here to avoid version conflicts.
+
+# Model backbones
+timm>=0.9.0                        # EfficientNet-B4 and ViT
+
+# Data handling
+pandas>=2.0.0
+opencv-python-headless>=4.8.0      # headless = no libGL needed
+scikit-learn>=1.3.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Video processing
+decord>=0.6.0                      # Fast GPU-accelerated video reader
+av>=11.0.0                         # PyAV fallback for video I/O
+
+# Experiment tracking & logging
+tqdm>=4.65.0
+PyYAML>=6.0
+
+# Image quality / frequency analysis
+scipy>=1.11.0                      # FFT, DCT operations
+
+# Reproducibility
+python-dotenv>=1.0.0
+
+# NumPy: pin to <2 — the PyTorch NGC build (2.6.0a0) was compiled
+# against NumPy 1.x and crashes at import with NumPy 2.x.
+numpy<2

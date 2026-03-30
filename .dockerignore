@@ -1,0 +1,15 @@
+# Don't send these to the Docker build context
+.git
+data/
+outputs/
+checkpoints/
+__pycache__
+*.pyc
+*.pth
+*.pt
+*.onnx
+.env
+wandb/
+runs/
+.mypy_cache/
+.ruff_cache/
