@@ -12,12 +12,76 @@ seed_everything  – Set random seeds for reproducibility.
 import os
 import random
 import glob
+import sys
+import atexit
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 import yaml
+
+
+_LOG_INITIALIZED = False
+_LOG_FILE_HANDLE = None
+
+
+class _TeeStream:
+    """Write stream output to multiple targets (terminal + log file)."""
+
+    encoding = "utf-8"
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+    def isatty(self):
+        return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
+
+
+def setup_script_logging(
+    script_name: str,
+    log_dir: str = "outputs/logs",
+    file_prefix: str = "log_data",
+) -> str:
+    """Mirror stdout/stderr to terminal and timestamped log file.
+
+    Returns
+    -------
+    str
+        Full path to the created log file.
+    """
+    global _LOG_INITIALIZED, _LOG_FILE_HANDLE
+
+    if _LOG_INITIALIZED and _LOG_FILE_HANDLE is not None:
+        return _LOG_FILE_HANDLE.name
+
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(log_dir, f"{file_prefix}_{timestamp}.log")
+    _LOG_FILE_HANDLE = open(log_path, "a", encoding="utf-8", buffering=1)
+
+    sys.stdout = _TeeStream(sys.stdout, _LOG_FILE_HANDLE)
+    sys.stderr = _TeeStream(sys.stderr, _LOG_FILE_HANDLE)
+
+    def _close_log_file():
+        if _LOG_FILE_HANDLE and not _LOG_FILE_HANDLE.closed:
+            _LOG_FILE_HANDLE.close()
+
+    atexit.register(_close_log_file)
+    _LOG_INITIALIZED = True
+    print(f"[LOG] {script_name} -> {log_path}")
+    return log_path
 
 
 # ------------------------------------------------------------------ #

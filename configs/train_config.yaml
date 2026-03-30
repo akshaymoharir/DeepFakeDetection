@@ -17,18 +17,18 @@ model:
 
 # ------ Data ------
 data:
-  # Switch to dataset_config.yaml once FaceForensics++ download finishes
-  config: configs/dataset_config_dummy.yaml
+  config: configs/dataset_config.yaml
   frames_per_clip: 8                # frames sampled per video per epoch
   image_size: 224
   num_workers: 4
   pin_memory: true
-  # FF++ manipulation methods to include (subset or all 4)
+  # FF++ manipulation methods to include (any subset available under data/frames)
   methods:
     - Deepfakes
     - Face2Face
-    - FaceSwap
-    - NeuralTextures
+    - FaceShifter
+    - DeepFakeDetection
+  real_dir: real
 
 # ------ Training ------
 training:

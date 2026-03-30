@@ -36,7 +36,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from src.utils.helpers import seed_everything
+from src.utils.helpers import seed_everything, setup_script_logging
 from src.data.dataset  import build_dataloaders
 from src.models.hsf_cvit import build_model
 from src.training.trainer import Trainer
@@ -70,6 +70,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr",         type=float, default=None, help="Override training.lr")
     p.add_argument("--no-amp",     action="store_true",      help="Disable mixed-precision")
     p.add_argument("--workers",    type=int,   default=None, help="Override data.num_workers")
+    p.add_argument(
+        "--methods", type=str, default=None,
+        help="Comma-separated FF++ fake methods (e.g. Deepfakes,Face2Face,FaceShifter)",
+    )
+    p.add_argument(
+        "--real-dir", type=str, default=None,
+        help="Name of real folder under extracted frames (default: real)",
+    )
 
     # Checkpoint
     p.add_argument("--resume",    default=None, help="Path to checkpoint to resume from")
@@ -107,6 +115,10 @@ def apply_cli_overrides(cfg: dict, args: argparse.Namespace) -> dict:
         cfg["training"]["amp"] = False
     if args.workers is not None:
         cfg["data"]["num_workers"] = args.workers
+    if args.methods:
+        cfg["data"]["methods"] = [m.strip() for m in args.methods.split(",") if m.strip()]
+    if args.real_dir:
+        cfg["data"]["real_dir"] = args.real_dir
     return cfg
 
 
@@ -130,6 +142,7 @@ def print_model_summary(model) -> None:
 # ------------------------------------------------------------------ #
 
 def main() -> None:
+    setup_script_logging("train")
     args = parse_args()
 
     # --- Config ---

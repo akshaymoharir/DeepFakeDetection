@@ -28,7 +28,7 @@ import numpy as np
 
 # Allow imports from project root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from src.utils.helpers import load_config, get_video_paths
+from src.utils.helpers import load_config, get_video_paths, setup_script_logging
 
 
 # ------------------------------------------------------------------ #
@@ -220,6 +220,7 @@ def parse_args():
 
 
 def main():
+    setup_script_logging("explore_dataset")
     args = parse_args()
     cfg = load_config(args.config)
 

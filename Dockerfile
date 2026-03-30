@@ -12,6 +12,7 @@ FROM nvcr.io/nvidia/pytorch:24.12-py3
 
 # Prevent interactive prompts during apt installs
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONNOUSERSITE=1
 
 # ---- System dependencies ----
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -46,18 +47,16 @@ RUN getent group ${GID} || groupadd -g ${GID} ${UNAME} && \
 # Create workspace directory and give ownership to the user
 RUN mkdir -p /workspace && chown ${UID}:${GID} /workspace
 
-# Switch to the non-root user to install packages and run the container
-USER ${UID}:${GID}
-WORKDIR /workspace
-
-# Ensure local bin is in PATH for pip installed tools
-ENV PATH="/home/${UNAME}/.local/bin:${PATH}"
-
 # ---- Python dependencies ----
 # Copy requirements first for Docker layer caching
 COPY --chown=${UID}:${GID} requirements.txt /workspace/requirements.txt
-RUN pip install --user --no-cache-dir --upgrade pip && \
-    pip install --user --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r /workspace/requirements.txt && \
+    pip install --no-cache-dir --force-reinstall "numpy<2"
+
+# Switch to non-root user for runtime
+USER ${UID}:${GID}
+WORKDIR /workspace
 
 # ---- Default entrypoint ----
 # Mount project as /workspace at runtime; drop into bash

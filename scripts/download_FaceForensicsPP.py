@@ -16,6 +16,9 @@ import random
 from tqdm import tqdm
 from os.path import join
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from src.utils.helpers import setup_script_logging
+
 
 # URLs and filenames
 FILELIST_URL = 'misc/filelist.json'
@@ -257,5 +260,6 @@ def main(args):
 
 
 if __name__ == "__main__":
+    setup_script_logging("download_FaceForensicsPP")
     args = parse_args()
     main(args)

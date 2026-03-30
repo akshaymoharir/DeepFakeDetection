@@ -45,6 +45,7 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - CUDA_VISIBLE_DEVICES=0
+      - PYTHONNOUSERSITE=1
 
     # ---- Keep alive ----
     stdin_open: true      # -i

@@ -45,7 +45,12 @@ from tqdm import tqdm
 
 # Allow imports from project root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from src.utils.helpers import load_config, get_video_paths, extract_frames
+from src.utils.helpers import (
+    load_config,
+    get_video_paths,
+    extract_frames,
+    setup_script_logging,
+)
 
 
 # ------------------------------------------------------------------ #
@@ -100,18 +105,25 @@ def extract_faceforensics(cfg: dict, args):
     out_base = ff_cfg["frame_extraction"]["output_dir"]
     max_frames = args.max_frames or ff_cfg["frame_extraction"]["max_frames_per_video"]
     resize = args.resize
+    methods = [m.strip() for m in args.ff_methods.split(",")] if args.ff_methods else ff_cfg["manipulation_methods"]
+    real_dirs = (
+        [d.strip() for d in args.ff_real_dirs.split(",")]
+        if args.ff_real_dirs else
+        ff_cfg.get("original_dirs", [ff_cfg["original_dir"]])
+    )
 
-    # Real
-    real_dir = os.path.join(root, ff_cfg["original_dir"], compression)
-    if os.path.isdir(real_dir):
-        videos = get_video_paths(real_dir)
-        out_dir = os.path.join(out_base, "real")
-        print(f"  Extracting {len(videos)} real videos → {out_dir}")
-        for vpath in tqdm(videos, desc="  FF++ Real", unit="vid"):
-            save_frames_for_video(vpath, out_dir, max_frames, resize)
+    # Real (possibly merged from multiple sources)
+    out_dir = os.path.join(out_base, "real")
+    for real_subdir in real_dirs:
+        real_dir = os.path.join(root, real_subdir, compression)
+        if os.path.isdir(real_dir):
+            videos = get_video_paths(real_dir)
+            print(f"  Extracting {len(videos)} real videos from {real_subdir} → {out_dir}")
+            for vpath in tqdm(videos, desc="  FF++ Real", unit="vid"):
+                save_frames_for_video(vpath, out_dir, max_frames, resize)
 
     # Manipulated
-    for method in ff_cfg["manipulation_methods"]:
+    for method in methods:
         manip_dir = os.path.join(root, ff_cfg["manipulated_dir"], method, compression)
         if os.path.isdir(manip_dir):
             videos = get_video_paths(manip_dir)
@@ -165,6 +177,10 @@ def parse_args():
     p = argparse.ArgumentParser(description="Extract frames from deepfake video datasets")
     p.add_argument("--config", default="configs/dataset_config.yaml")
     p.add_argument("--dataset", choices=["ff++", "celeb-df", "all"], default="all")
+    p.add_argument("--ff-methods", type=str, default=None,
+                   help="Comma-separated FF++ methods to extract (default: config list)")
+    p.add_argument("--ff-real-dirs", type=str, default=None,
+                   help="Comma-separated FF++ real dirs relative to root_dir (default: config list)")
     p.add_argument("--max-frames", type=int, default=None,
                    help="Override max frames per video (default: from config)")
     p.add_argument("--resize", type=int, default=224,
@@ -173,6 +189,7 @@ def parse_args():
 
 
 def main():
+    setup_script_logging("extract_frames")
     args = parse_args()
     cfg = load_config(args.config)
 

@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from src.utils.helpers import seed_everything
+from src.utils.helpers import seed_everything, setup_script_logging
 
 
 # ------------------------------------------------------------------ #
@@ -213,6 +213,7 @@ def print_tree(root):
 # ------------------------------------------------------------------ #
 
 def main():
+    setup_script_logging("create_dummy_datasets")
     p = argparse.ArgumentParser(description="Generate dummy deepfake datasets")
     p.add_argument("--output", default="data")
     p.add_argument("--n-videos", type=int, default=10)

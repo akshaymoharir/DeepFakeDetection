@@ -33,6 +33,7 @@ from src.utils.helpers import (
     get_video_paths,
     extract_frames,
     seed_everything,
+    setup_script_logging,
 )
 
 
@@ -400,6 +401,7 @@ def parse_args():
 
 
 def main():
+    setup_script_logging("plot_samples")
     args = parse_args()
     seed_everything(42)
     cfg = load_config(args.config)

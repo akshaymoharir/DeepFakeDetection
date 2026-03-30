@@ -102,6 +102,7 @@ docker run \
     -p 8888:8888 \
     -e NVIDIA_VISIBLE_DEVICES=all \
     -e CUDA_VISIBLE_DEVICES=0 \
+    -e PYTHONNOUSERSITE=1 \
     -w /workspace \
     "$IMAGE_NAME" \
     $CMD
