@@ -70,7 +70,6 @@ def save_frames_for_video(
     """
     stem = Path(video_path).stem
     vid_out = os.path.join(output_dir, stem)
-    os.makedirs(vid_out, exist_ok=True)
 
     try:
         frames = extract_frames(video_path, max_frames=max_frames,
@@ -78,6 +77,12 @@ def save_frames_for_video(
     except (IOError, ValueError) as e:
         print(f"  ⚠  Skipping {video_path}: {e}")
         return 0
+
+    if len(frames) == 0:
+        print(f"  ⚠  Skipping {video_path}: no frames decoded by any backend.")
+        return 0
+
+    os.makedirs(vid_out, exist_ok=True)
 
     saved = 0
     for i, frame in enumerate(frames):

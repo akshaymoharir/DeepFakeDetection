@@ -18,9 +18,24 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import cv2
 import numpy as np
 import yaml
+
+try:
+    import cv2
+except ImportError:  # pragma: no cover - depends on runtime env
+    cv2 = None
+
+try:
+    import av
+except ImportError:  # pragma: no cover - depends on runtime env
+    av = None
+
+try:
+    from decord import VideoReader, cpu
+except ImportError:  # pragma: no cover - depends on runtime env
+    VideoReader = None
+    cpu = None
 
 
 _LOG_INITIALIZED = False
@@ -162,30 +177,119 @@ def extract_frames(
     np.ndarray
         Array of shape (N, H, W, 3) in RGB colour space.
     """
+    errors = []
+    readers = [
+        ("opencv", _extract_frames_opencv),
+        ("decord", _extract_frames_decord),
+        ("pyav", _extract_frames_pyav),
+    ]
+
+    for reader_name, reader in readers:
+        try:
+            frames = reader(video_path, max_frames=max_frames, resize=resize)
+            if len(frames) == 0:
+                raise ValueError(f"{reader_name} returned 0 decoded frames")
+            return np.asarray(frames)
+        except Exception as exc:
+            errors.append(f"{reader_name}: {exc}")
+
+    raise IOError(
+        f"Cannot open video: {video_path}. Tried backends -> " + " | ".join(errors)
+    )
+
+
+def _resize_frame(frame: np.ndarray, resize: Optional[Tuple[int, int]]) -> np.ndarray:
+    if resize is None:
+        return frame
+    if cv2 is not None:
+        return cv2.resize(frame, resize, interpolation=cv2.INTER_AREA)
+
+    width, height = resize
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover - Pillow should exist in runtime
+        raise ImportError("Pillow is required for resizing without OpenCV.") from exc
+
+    image = Image.fromarray(frame)
+    return np.asarray(image.resize((width, height), Image.Resampling.BILINEAR))
+
+
+def _extract_frames_opencv(
+    video_path: str,
+    max_frames: int = 32,
+    resize: Optional[Tuple[int, int]] = None,
+) -> np.ndarray:
+    if cv2 is None:
+        raise ImportError("cv2 is not installed")
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise IOError(f"Cannot open video: {video_path}")
+        raise IOError("VideoCapture could not open file")
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if total_frames <= 0:
         cap.release()
-        raise ValueError(f"Video has 0 frames: {video_path}")
+        raise ValueError("Video has 0 frames according to OpenCV")
 
     indices = np.linspace(0, total_frames - 1, min(max_frames, total_frames), dtype=int)
-
     frames = []
     for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
         ret, frame = cap.read()
         if not ret:
             continue
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        if resize:
-            frame = cv2.resize(frame, resize, interpolation=cv2.INTER_AREA)
-        frames.append(frame)
-
+        frames.append(_resize_frame(frame, resize))
     cap.release()
-    return np.array(frames)
+    return np.asarray(frames)
+
+
+def _extract_frames_decord(
+    video_path: str,
+    max_frames: int = 32,
+    resize: Optional[Tuple[int, int]] = None,
+) -> np.ndarray:
+    if VideoReader is None or cpu is None:
+        raise ImportError("decord is not installed")
+
+    vr = VideoReader(video_path, ctx=cpu(0))
+    total_frames = len(vr)
+    if total_frames <= 0:
+        raise ValueError("Video has 0 frames according to decord")
+
+    indices = np.linspace(0, total_frames - 1, min(max_frames, total_frames), dtype=int)
+    batch = vr.get_batch(indices.tolist()).asnumpy()
+    return np.asarray([_resize_frame(frame, resize) for frame in batch])
+
+
+def _extract_frames_pyav(
+    video_path: str,
+    max_frames: int = 32,
+    resize: Optional[Tuple[int, int]] = None,
+) -> np.ndarray:
+    if av is None:
+        raise ImportError("PyAV is not installed")
+
+    with av.open(video_path) as container:
+        stream = container.streams.video[0]
+        if stream.frames and stream.frames > 0:
+            total_frames = stream.frames
+            indices = set(
+                np.linspace(0, total_frames - 1, min(max_frames, total_frames), dtype=int).tolist()
+            )
+            frames = []
+            for idx, frame in enumerate(container.decode(stream)):
+                if idx in indices:
+                    frames.append(_resize_frame(frame.to_ndarray(format="rgb24"), resize))
+                if len(frames) == len(indices):
+                    break
+            return np.asarray(frames)
+
+        decoded = [frame.to_ndarray(format="rgb24") for frame in container.decode(stream)]
+        if not decoded:
+            raise ValueError("Video has 0 frames according to PyAV")
+        indices = np.linspace(0, len(decoded) - 1, min(max_frames, len(decoded)), dtype=int)
+        return np.asarray([_resize_frame(decoded[idx], resize) for idx in indices])
 
 
 # ------------------------------------------------------------------ #
