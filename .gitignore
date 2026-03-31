@@ -227,3 +227,6 @@ checkpoints/
 # Wandb / Tensorboard logs
 wandb/
 runs/
+
+# Exclude macos file
+.DS_Store
