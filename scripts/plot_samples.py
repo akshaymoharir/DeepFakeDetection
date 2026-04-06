@@ -249,7 +249,10 @@ def plot_class_distribution(
         linewidth=0.8,
     )
     ax.set_ylabel("Number of videos")
-    ax.set_title(f"{dataset_name} — Class Distribution", fontweight="bold")
+    ax.set_title(
+        f"{dataset_name} — Class Distribution\n(raw videos pooled across selected fake methods)",
+        fontweight="bold",
+    )
 
     # Value labels on bars
     for bar, val in zip(bars, [real_count, fake_count]):

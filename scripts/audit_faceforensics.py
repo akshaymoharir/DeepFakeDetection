@@ -93,7 +93,7 @@ def infer_split(video_name: str, split_ranges: dict, split_ratios: dict):
 def parse_args():
     p = argparse.ArgumentParser(description="Audit local FaceForensics++ extracted frames")
     p.add_argument("--dataset-config", default="configs/dataset_config.yaml")
-    p.add_argument("--train-config", default="configs/train_config_ablation.yaml")
+    p.add_argument("--train-config", default="configs/train_config.yaml")
     return p.parse_args()
 
 

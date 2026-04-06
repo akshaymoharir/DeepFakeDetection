@@ -18,22 +18,24 @@ model:
 # ------ Data ------
 data:
   config: configs/dataset_config.yaml
-  frames_per_clip: 8                # frames sampled per video per epoch
+  frames_per_clip: 1                # standard frame-level training: one sampled frame per clip per item
   image_size: 224
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
+  prefetch_factor: 4
+  balance_strategy: weighted_sampler  # none | weighted_sampler
   # FF++ manipulation methods to include (any subset available under data/frames)
   methods:
     - Deepfakes
     - Face2Face
-    - FaceShifter
-    - DeepFakeDetection
+    - FaceSwap
+    - NeuralTextures
   real_dir: real
 
 # ------ Training ------
 training:
   epochs: 50
-  batch_size: 16
+  batch_size: 32
   optimizer: adamw                  # adamw | adam | sgd
   lr: 3.0e-4
   weight_decay: 1.0e-4
@@ -42,6 +44,15 @@ training:
   gradient_clip: 1.0
   label_smoothing: 0.1
   amp: true                         # mixed-precision (fp16) — requires CUDA
+
+# ------ Evaluation ------
+evaluation:
+  decision_threshold: 0.5
+  optimize_threshold: true
+  threshold_metric: f1
+  threshold_min: 0.05
+  threshold_max: 0.95
+  threshold_step: 0.01
 
 # ------ Checkpoints ------
 checkpoints:

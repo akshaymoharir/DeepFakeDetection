@@ -1,7 +1,7 @@
 # ============================================================
-# Train Configuration — Small FF++ Ablation Study
+# Train Configuration — HSF-CVIT DeepFake Detection
+# Extended FF++ profile
 # ============================================================
-# Designed for quick, meaningful comparisons on a compact subset.
 
 # ------ Model ------
 model:
@@ -16,54 +16,54 @@ model:
 
 # ------ Data ------
 data:
-  config: configs/dataset_config.yaml
-  frames_per_clip: 4
+  config: configs/dataset_config_extended.yaml
+  frames_per_clip: 1
   image_size: 224
   num_workers: 4
   pin_memory: true
+  balance_strategy: weighted_sampler
   methods:
     - Deepfakes
     - Face2Face
+    - FaceSwap
+    - NeuralTextures
+    - FaceShifter
+    - DeepFakeDetection
   real_dir: real
-  ablation:
-    # Balanced, small-by-default subset sizes.
-    # Effective train size is roughly:
-    #   real_train + len(methods) * fake_train_per_method
-    max_real_videos_per_split:
-      train: 64
-      val: 16
-      test: 16
-    max_fake_videos_per_method_per_split:
-      train: 64
-      val: 16
-      test: 16
-    subset_seed: 42
 
 # ------ Training ------
 training:
-  epochs: 15
-  batch_size: 8
+  epochs: 50
+  batch_size: 16
   optimizer: adamw
   lr: 3.0e-4
   weight_decay: 1.0e-4
-  warmup_epochs: 2
+  warmup_epochs: 5
   lr_schedule: cosine
   gradient_clip: 1.0
   label_smoothing: 0.1
   amp: true
 
+evaluation:
+  decision_threshold: 0.5
+  optimize_threshold: true
+  threshold_metric: f1
+  threshold_min: 0.05
+  threshold_max: 0.95
+  threshold_step: 0.01
+
 # ------ Checkpoints ------
 checkpoints:
-  dir: outputs/ablation_checkpoints
+  dir: outputs/checkpoints_extended
   save_every: 5
-  early_stop_patience: 5
-  keep_last: 2
+  early_stop_patience: 10
+  keep_last: 3
 
 # ------ Logging ------
 logging:
-  tensorboard_dir: outputs/ablation_runs
+  tensorboard_dir: outputs/runs_extended
   log_interval: 10
-  csv_log: outputs/ablation_training_log.csv
+  csv_log: outputs/training_log_extended.csv
 
 # ------ Reproducibility ------
 seed: 42
