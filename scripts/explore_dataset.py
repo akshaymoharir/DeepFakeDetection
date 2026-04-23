@@ -28,7 +28,14 @@ import numpy as np
 
 # Allow imports from project root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from src.utils.helpers import load_config, get_video_paths, setup_script_logging
+from src.utils.helpers import (
+    load_config,
+    get_video_paths,
+    setup_script_logging,
+    av,
+    VideoReader,
+    cpu,
+)
 
 
 # ------------------------------------------------------------------ #
@@ -37,31 +44,105 @@ from src.utils.helpers import load_config, get_video_paths, setup_script_logging
 
 def video_metadata(video_path: str) -> dict:
     """Return frame count, FPS, width, height, and duration for a video."""
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return {
-            "path": video_path,
-            "frames": 0,
-            "fps": 0,
-            "width": 0,
-            "height": 0,
-            "duration_sec": 0,
-        }
+    errors = []
 
-    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # 1. OpenCV
+    cap = cv2.VideoCapture(video_path)
+    if cap.isOpened():
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        if n_frames > 0 and fps > 0 and w > 0 and h > 0:
+            duration = n_frames / fps
+            return {
+                "path": video_path,
+                "frames": n_frames,
+                "fps": round(fps, 2),
+                "width": w,
+                "height": h,
+                "duration_sec": round(duration, 2),
+                "readable": True,
+                "backend": "opencv",
+            }
+        errors.append(
+            f"opencv: invalid metadata frames={n_frames}, fps={fps}, width={w}, height={h}"
+        )
+    else:
+        errors.append("opencv: could not open file")
     cap.release()
 
-    duration = n_frames / fps if fps > 0 else 0
+    # 2. Decord
+    if VideoReader is not None and cpu is not None:
+        try:
+            vr = VideoReader(video_path, ctx=cpu(0))
+            n_frames = len(vr)
+            if n_frames <= 0:
+                raise ValueError("0 frames")
+
+            first = vr[0].asnumpy()
+            h, w = int(first.shape[0]), int(first.shape[1])
+            avg_fps = float(vr.get_avg_fps())
+            duration = n_frames / avg_fps if avg_fps > 0 else 0
+            return {
+                "path": video_path,
+                "frames": n_frames,
+                "fps": round(avg_fps, 2),
+                "width": w,
+                "height": h,
+                "duration_sec": round(duration, 2),
+                "readable": True,
+                "backend": "decord",
+            }
+        except Exception as exc:
+            errors.append(f"decord: {exc}")
+
+    # 3. PyAV
+    if av is not None:
+        try:
+            with av.open(video_path) as container:
+                stream = container.streams.video[0]
+                n_frames = int(stream.frames or 0)
+                fps = float(stream.average_rate) if stream.average_rate is not None else 0.0
+                w = int(stream.width or 0)
+                h = int(stream.height or 0)
+
+                if n_frames <= 0:
+                    decoded = 0
+                    for _ in container.decode(stream):
+                        decoded += 1
+                    n_frames = decoded
+
+                if n_frames <= 0 or w <= 0 or h <= 0:
+                    raise ValueError(
+                        f"invalid metadata frames={n_frames}, width={w}, height={h}"
+                    )
+
+                duration = n_frames / fps if fps > 0 else 0
+                return {
+                    "path": video_path,
+                    "frames": n_frames,
+                    "fps": round(fps, 2),
+                    "width": w,
+                    "height": h,
+                    "duration_sec": round(duration, 2),
+                    "readable": True,
+                    "backend": "pyav",
+                }
+        except Exception as exc:
+            errors.append(f"pyav: {exc}")
+
     return {
         "path": video_path,
-        "frames": n_frames,
-        "fps": round(fps, 2),
-        "width": w,
-        "height": h,
-        "duration_sec": round(duration, 2),
+        "frames": 0,
+        "fps": 0,
+        "width": 0,
+        "height": 0,
+        "duration_sec": 0,
+        "readable": False,
+        "backend": "unreadable",
+        "error": " | ".join(errors),
     }
 
 
@@ -177,12 +258,17 @@ def print_summary(metadata: list) -> None:
     for (ds, cat, label), items in sorted(groups.items()):
         n = len(items)
         total_videos += n
-        avg_frames = np.mean([i["frames"] for i in items])
-        avg_dur = np.mean([i["duration_sec"] for i in items])
+        readable_items = [i for i in items if i.get("readable", True)]
+        avg_frames = np.mean([i["frames"] for i in readable_items]) if readable_items else 0.0
+        avg_dur = np.mean([i["duration_sec"] for i in readable_items]) if readable_items else 0.0
         # Most common resolution
-        resolutions = [f'{i["width"]}x{i["height"]}' for i in items]
+        resolutions = [f'{i["width"]}x{i["height"]}' for i in readable_items if i["width"] > 0 and i["height"] > 0]
         common_res = max(set(resolutions), key=resolutions.count) if resolutions else "N/A"
         print(f"{ds:<20} {cat:<18} {label:<6} {n:>7} {avg_frames:>11.1f} {avg_dur:>12.1f} {common_res:>14}")
+
+        unreadable = n - len(readable_items)
+        if unreadable:
+            print(f"{'':<20} {'':<18} {'':<6} {'':>7} {'':>11} {'':>12} {'unreadable=' + str(unreadable):>14}")
 
     print("=" * len(header))
     print(f"{'TOTAL':<46} {total_videos:>7}")

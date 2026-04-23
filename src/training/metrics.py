@@ -63,6 +63,48 @@ def compute_metrics(
     }
 
 
+def find_best_threshold(
+    all_labels: np.ndarray,
+    all_probs: np.ndarray,
+    metric: str = "f1",
+    threshold_min: float = 0.05,
+    threshold_max: float = 0.95,
+    threshold_step: float = 0.01,
+) -> dict:
+    """Sweep thresholds and return the best one for the requested metric."""
+    labels = np.asarray(all_labels, dtype=int)
+    probs  = np.asarray(all_probs, dtype=float)
+    probs  = np.nan_to_num(probs, nan=0.5, posinf=1.0, neginf=0.0)
+
+    if len(labels) == 0:
+        raise ValueError("Cannot optimize threshold with zero samples.")
+
+    metric = metric.lower()
+    if metric not in {"f1", "precision", "recall", "accuracy"}:
+        raise ValueError(f"Unsupported threshold metric: {metric}")
+
+    best = None
+    thresholds = np.arange(threshold_min, threshold_max + threshold_step * 0.5, threshold_step)
+    for threshold in thresholds:
+        metrics = compute_metrics(labels, probs, threshold=float(threshold))
+        score = metrics[metric]
+        candidate = {
+            "threshold": float(threshold),
+            "score": float(score),
+            "metrics": metrics,
+        }
+        if best is None:
+            best = candidate
+            continue
+        if candidate["score"] > best["score"]:
+            best = candidate
+            continue
+        if candidate["score"] == best["score"] and abs(candidate["threshold"] - 0.5) < abs(best["threshold"] - 0.5):
+            best = candidate
+
+    return best
+
+
 class MetricAccumulator:
     """Accumulate logits and labels across mini-batches, compute at epoch end.
 
@@ -92,6 +134,29 @@ class MetricAccumulator:
             np.array(self._labels),
             np.array(self._probs),
             threshold=threshold,
+        )
+
+    def arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        return (
+            np.array(self._labels, dtype=int),
+            np.array(self._probs, dtype=float),
+        )
+
+    def best_threshold(
+        self,
+        metric: str = "f1",
+        threshold_min: float = 0.05,
+        threshold_max: float = 0.95,
+        threshold_step: float = 0.01,
+    ) -> dict:
+        labels, probs = self.arrays()
+        return find_best_threshold(
+            labels,
+            probs,
+            metric=metric,
+            threshold_min=threshold_min,
+            threshold_max=threshold_max,
+            threshold_step=threshold_step,
         )
 
     def reset(self) -> None:

@@ -40,6 +40,8 @@ except ImportError:  # pragma: no cover - depends on runtime env
 
 _LOG_INITIALIZED = False
 _LOG_FILE_HANDLE = None
+_ORIGINAL_STDOUT = sys.stdout
+_ORIGINAL_STDERR = sys.stderr
 
 
 class _TeeStream:
@@ -52,13 +54,19 @@ class _TeeStream:
 
     def write(self, data):
         for stream in self.streams:
-            stream.write(data)
-            stream.flush()
+            try:
+                stream.write(data)
+                stream.flush()
+            except Exception:
+                continue
         return len(data)
 
     def flush(self):
         for stream in self.streams:
-            stream.flush()
+            try:
+                stream.flush()
+            except Exception:
+                continue
 
     def isatty(self):
         return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
@@ -90,8 +98,13 @@ def setup_script_logging(
     sys.stderr = _TeeStream(sys.stderr, _LOG_FILE_HANDLE)
 
     def _close_log_file():
+        global _LOG_INITIALIZED, _LOG_FILE_HANDLE
+        sys.stdout = _ORIGINAL_STDOUT
+        sys.stderr = _ORIGINAL_STDERR
         if _LOG_FILE_HANDLE and not _LOG_FILE_HANDLE.closed:
             _LOG_FILE_HANDLE.close()
+        _LOG_INITIALIZED = False
+        _LOG_FILE_HANDLE = None
 
     atexit.register(_close_log_file)
     _LOG_INITIALIZED = True
@@ -136,6 +149,9 @@ def get_video_paths(root_dir: str, extensions: set = None) -> List[str]:
     paths = []
     for dirpath, _, filenames in os.walk(root_dir):
         for fname in filenames:
+            # Ignore hidden metadata sidecars such as macOS AppleDouble files.
+            if fname.startswith("."):
+                continue
             if Path(fname).suffix.lower() in extensions:
                 paths.append(os.path.join(dirpath, fname))
     return sorted(paths)

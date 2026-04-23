@@ -1,35 +1,33 @@
 # ============================================================
 # Dataset Configuration — DeepFake Detection
+# Extended FF++ profile with extra sources and methods
 # ============================================================
-# Paths are relative to the project root unless stated otherwise.
-# Override with environment variables or CLI flags at runtime.
 
 # ------ FaceForensics++ ------
 faceforensics:
-  profile: "ffpp_standard"            # standard benchmark profile
+  profile: "ffpp_extended"
   root_dir: "data"
   compression: "c23"                   # c0 (raw) | c23 (HQ) | c40 (LQ)
-  split_mode: "official"               # official pair split files | numeric fallback
-  split_files:
-    train: "configs/ffpp_splits/train.json"
-    val: "configs/ffpp_splits/val.json"
-    test: "configs/ffpp_splits/test.json"
+  split_mode: "numeric"               # actor / extended sources need fallback split inference
   manipulation_methods:
     - "Deepfakes"
     - "Face2Face"
     - "FaceSwap"
     - "NeuralTextures"
+    - "FaceShifter"
+    - "DeepFakeDetection"
   original_dir: "original_sequences/youtube"
-  # Standard FF++ uses only youtube as the real class source.
+  # Extended profile can merge additional real videos from the actors subset.
   original_dirs:
     - "original_sequences/youtube"
+    - "original_sequences/actors"
   manipulated_dir: "manipulated_sequences"
   frame_extraction:
     enabled: true
-    max_frames_per_video: 32           # uniform sampling across video
-    output_dir: "data/frames_ffpp_standard"
+    max_frames_per_video: 32
+    output_dir: "data/frames_ffpp_extended"
   splits:
-    train: [0, 720]                    # video indices
+    train: [0, 720]
     val: [720, 860]
     test: [860, 1000]
 
@@ -48,7 +46,7 @@ celeb_df:
 
 # ------ Common ------
 common:
-  image_size: 224                      # resize target (H x W)
-  face_crop: true                     # extract face ROI before saving frames
+  image_size: 224
+  face_crop: true
   random_seed: 42
   num_workers: 4

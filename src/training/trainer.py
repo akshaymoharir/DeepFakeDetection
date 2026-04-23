@@ -72,6 +72,7 @@ class Trainer:
         t_cfg  = train_cfg["training"]
         ck_cfg = train_cfg["checkpoints"]
         lg_cfg = train_cfg["logging"]
+        ev_cfg = train_cfg.get("evaluation", {})
 
         # ---- Optimizer ----
         self.optimizer = self._build_optimizer(t_cfg)
@@ -92,6 +93,14 @@ class Trainer:
         # ---- Warm-up epochs for spatial branch ----
         self.freeze_spatial_epochs = train_cfg["model"].get("freeze_spatial_epochs", 2)
 
+        # ---- Evaluation / thresholding ----
+        self.default_threshold = float(ev_cfg.get("decision_threshold", 0.5))
+        self.optimize_threshold = bool(ev_cfg.get("optimize_threshold", True))
+        self.threshold_metric = ev_cfg.get("threshold_metric", "f1")
+        self.threshold_min = float(ev_cfg.get("threshold_min", 0.05))
+        self.threshold_max = float(ev_cfg.get("threshold_max", 0.95))
+        self.threshold_step = float(ev_cfg.get("threshold_step", 0.01))
+
         # ---- Checkpointing ----
         self.ckpt_dir      = ck_cfg["dir"]
         self.save_every    = ck_cfg.get("save_every", 5)
@@ -109,6 +118,7 @@ class Trainer:
         # ---- State ----
         self.global_step   = 0
         self.best_val_auc  = 0.0
+        self.best_threshold = self.default_threshold
         self.epochs_no_imp = 0           # early-stop counter
 
     # ------------------------------------------------------------------
@@ -205,7 +215,7 @@ class Trainer:
             train_loss, train_metrics = self._train_epoch(train_loader, epoch)
 
             # --- Validate ---
-            val_loss, val_metrics = self._val_epoch(val_loader, epoch)
+            val_loss, val_metrics, threshold_info = self._val_epoch(val_loader, epoch)
 
             # --- LR step ---
             sched = self.scheduler
@@ -232,6 +242,12 @@ class Trainer:
 
             # --- Checkpoint ---
             val_auc = val_metrics.get("roc_auc", 0.0)
+            if not math.isnan(val_auc) and val_auc > self.best_val_auc:
+                self.best_threshold = (
+                    threshold_info["threshold"]
+                    if threshold_info is not None
+                    else self.default_threshold
+                )
             self._maybe_save_checkpoint(epoch, val_auc)
 
             # --- Early stopping ---
@@ -316,20 +332,33 @@ class Trainer:
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         avg_loss = total_loss / max(n_batches, 1)
-        metrics  = accumulator.compute()
-        return avg_loss, metrics
+        metrics  = accumulator.compute(threshold=self.default_threshold)
+        threshold_info = None
+        if self.optimize_threshold:
+            threshold_info = accumulator.best_threshold(
+                metric=self.threshold_metric,
+                threshold_min=self.threshold_min,
+                threshold_max=self.threshold_max,
+                threshold_step=self.threshold_step,
+            )
+            metrics["optimal_threshold"] = threshold_info["threshold"]
+            metrics[f"optimal_{self.threshold_metric}"] = threshold_info["score"]
+            for key, value in threshold_info["metrics"].items():
+                metrics[f"thresholded_{key}"] = value
+        return avg_loss, metrics, threshold_info
 
     # ------------------------------------------------------------------
     #  Test / evaluation
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def evaluate(self, loader) -> dict:
+    def evaluate(self, loader, threshold: Optional[float] = None) -> dict:
         """Evaluate on a held-out test set and return metrics dict."""
         self.model.eval()
         accumulator = MetricAccumulator()
         total_loss  = 0.0
         n_batches   = 0
+        eval_threshold = self.best_threshold if threshold is None else float(threshold)
 
         print("\n▶ Evaluating on test set …")
         for images, labels in tqdm(loader, desc="  Test", ncols=100):
@@ -344,8 +373,13 @@ class Trainer:
             n_batches  += 1
             accumulator.update(logits, labels)
 
-        metrics = accumulator.compute()
+        metrics = accumulator.compute(threshold=eval_threshold)
         metrics["loss"] = total_loss / max(n_batches, 1)
+        metrics["threshold"] = eval_threshold
+        if abs(eval_threshold - self.default_threshold) > 1e-8:
+            fixed_metrics = accumulator.compute(threshold=self.default_threshold)
+            for key, value in fixed_metrics.items():
+                metrics[f"default_{key}"] = value
 
         print("\n  ── Test Results ──────────────────────")
         for k, v in metrics.items():
@@ -358,25 +392,30 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def _maybe_save_checkpoint(self, epoch: int, val_auc: float) -> None:
+        is_best = not math.isnan(val_auc) and val_auc > self.best_val_auc
+
+        if is_best:
+            self.best_val_auc  = val_auc
+            self.epochs_no_imp = 0
+        else:
+            self.epochs_no_imp += 1
+
         state = {
-            "epoch":        epoch + 1,
-            "model":        self.model.state_dict(),
-            "optimizer":    self.optimizer.state_dict(),
-            "scheduler":    self.scheduler.state_dict(),
-            "scaler":       self.scaler.state_dict(),
-            "best_val_auc": self.best_val_auc,
-            "global_step":  self.global_step,
+            "epoch":          epoch + 1,
+            "model":          self.model.state_dict(),
+            "optimizer":      self.optimizer.state_dict(),
+            "scheduler":      self.scheduler.state_dict(),
+            "scaler":         self.scaler.state_dict(),
+            "best_val_auc":   self.best_val_auc,
+            "best_threshold": self.best_threshold,
+            "global_step":    self.global_step,
         }
 
         # Best model
-        if not math.isnan(val_auc) and val_auc > self.best_val_auc:
-            self.best_val_auc  = val_auc
-            self.epochs_no_imp = 0
+        if is_best:
             best_path = os.path.join(self.ckpt_dir, "best.pt")
             torch.save(state, best_path)
             print(f"  💾 New best val AUC: {val_auc:.4f} → {best_path}")
-        else:
-            self.epochs_no_imp += 1
 
         # Periodic checkpoint
         if (epoch + 1) % self.save_every == 0:
@@ -398,9 +437,13 @@ class Trainer:
         self.scheduler.load_state_dict(ckpt["scheduler"])
         self.scaler.load_state_dict(ckpt["scaler"])
         self.best_val_auc = ckpt.get("best_val_auc", 0.0)
+        self.best_threshold = float(ckpt.get("best_threshold", self.default_threshold))
         self.global_step  = ckpt.get("global_step", 0)
         start_epoch = ckpt["epoch"]
-        print(f"  ▶ Resumed from {path}  (epoch {start_epoch}, best AUC {self.best_val_auc:.4f})")
+        print(
+            f"  ▶ Resumed from {path}  (epoch {start_epoch}, "
+            f"best AUC {self.best_val_auc:.4f}, threshold {self.best_threshold:.2f})"
+        )
         return start_epoch
 
     # ------------------------------------------------------------------
@@ -425,7 +468,10 @@ class Trainer:
             f"LR={lr:.2e}  "
             f"Train loss={tr_loss:.4f}  AUC={tr_m.get('roc_auc',float('nan')):.4f}  "
             f"| Val loss={vl_loss:.4f}  AUC={vl_m.get('roc_auc',float('nan')):.4f}  "
-            f"F1={vl_m.get('f1',0):.4f}  {star}"
+            f"F1@0.50={vl_m.get('f1',0):.4f}  "
+            f"T*={vl_m.get('optimal_threshold', self.default_threshold):.2f}  "
+            f"{self.threshold_metric.upper()}*={vl_m.get(f'optimal_{self.threshold_metric}', vl_m.get(self.threshold_metric, 0)):.4f}  "
+            f"{star}"
         )
 
     def _log_epoch_tb(self, epoch, tr_loss, tr_m, vl_loss, vl_m, lr) -> None:

@@ -158,7 +158,7 @@ class SRMFrequencyBranch(nn.Module):
         """
         Parameters
         ----------
-        x : (B, 3, H, W)  — input RGB images, values in [0, 1] after Normalize
+        x : (B, 3, H, W)  — input RGB images, values in [0, 1]
 
         Returns
         -------

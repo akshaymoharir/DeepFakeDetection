@@ -84,6 +84,19 @@ class HSF_CVIT(nn.Module):
             dropout=dropout,
         )
 
+        # EfficientNet consumes ImageNet-normalized tensors.
+        # Before the SRM branch, map them back to image-space RGB in [0, 1].
+        self.register_buffer(
+            "imagenet_mean",
+            torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "imagenet_std",
+            torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1),
+            persistent=False,
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Parameters
@@ -95,7 +108,8 @@ class HSF_CVIT(nn.Module):
         logits : (B, 1)  — unscaled; apply sigmoid for probabilities
         """
         s = self.spatial_branch(x)          # (B, spatial_out_dim)
-        f = self.freq_branch(x)             # (B, freq_out_dim)
+        x_rgb = (x * self.imagenet_std + self.imagenet_mean).clamp(0.0, 1.0)
+        f = self.freq_branch(x_rgb)         # (B, freq_out_dim)
         return self.fusion_head(s, f)       # (B, 1)
 
     # ------------------------------------------------------------------

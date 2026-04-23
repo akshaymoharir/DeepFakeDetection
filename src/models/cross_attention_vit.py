@@ -1,47 +1,36 @@
 """
-src/models/cross_attention_vit.py — Cross-Attention Fusion Head
-===============================================================
+src/models/cross_attention_vit.py — Token Fusion Transformer Head
+=================================================================
 
-Performs cross-attention between the spatial token (from EfficientNet-B4)
-and the frequency token (from the SRM branch), then classifies the fused
-representation.
+Fuses the spatial token from EfficientNet-B4 and the frequency token
+from the SRM branch with a small transformer over a 3-token sequence:
 
-Architecture
-------------
-Spatial token s  (B, spatial_dim) → project → (B, 1, fusion_dim)  [query Q]
-Freq token f     (B, freq_dim)    → project → (B, 1, fusion_dim)  [key K, value V]
+    [CLS] + spatial + frequency
 
-MultiheadAttention(Q, K, V) → (B, 1, fusion_dim)
-LayerNorm → MLP (fusion_dim → fusion_dim*2 → fusion_dim) → LayerNorm
-→ squeeze → (B, fusion_dim)
-→ Dropout → Linear(fusion_dim, 1)
-→ raw logit (no sigmoid — BCEWithLogitsLoss in trainer)
-
-Cross-attention direction: spatial queries "attend" to frequency features,
-letting the model selectively weight which frequency artifacts matter for
-each spatial pattern.
+This replaces the earlier single-query/single-key cross-attention block,
+which had effectively trivial attention weights. The public interface stays
+the same so the rest of the training pipeline does not change.
 """
 
 import torch
 import torch.nn as nn
-import math
 
 
 class CrossAttentionViT(nn.Module):
-    """Cross-attention fusion of spatial and frequency tokens.
+    """Transformer-style fusion of spatial and frequency tokens.
 
     Parameters
     ----------
     spatial_dim : int
         Dimension of the spatial token from EfficientNet.
     freq_dim : int
-        Dimension of the frequency token from SRM encoder.
+        Dimension of the frequency token from the SRM encoder.
     fusion_dim : int
-        Internal transformer hidden size (queries/keys/values).
+        Shared embedding width used inside the fusion transformer.
     num_heads : int
-        Number of attention heads (``fusion_dim`` must be divisible by this).
+        Number of attention heads.
     dropout : float
-        Dropout on attention weights and MLP.
+        Dropout rate used throughout the fusion head.
     """
 
     def __init__(
@@ -54,56 +43,44 @@ class CrossAttentionViT(nn.Module):
     ):
         super().__init__()
 
-        assert fusion_dim % num_heads == 0, (
-            f"fusion_dim ({fusion_dim}) must be divisible by num_heads ({num_heads})"
-        )
+        if fusion_dim % num_heads != 0:
+            raise ValueError(
+                f"fusion_dim ({fusion_dim}) must be divisible by num_heads ({num_heads})"
+            )
 
-        # Project branches into shared fusion_dim space
         self.proj_spatial = nn.Linear(spatial_dim, fusion_dim)
-        self.proj_freq    = nn.Linear(freq_dim, fusion_dim)
+        self.proj_freq = nn.Linear(freq_dim, fusion_dim)
 
-        # Learnable [CLS]-like position embeddings for the two tokens
-        self.pos_spatial = nn.Parameter(torch.randn(1, 1, fusion_dim) * 0.02)
-        self.pos_freq    = nn.Parameter(torch.randn(1, 1, fusion_dim) * 0.02)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, fusion_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, 3, fusion_dim))
 
-        # Cross-attention: spatial queries attend to frequency key/value
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=fusion_dim,
-            num_heads=num_heads,
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=fusion_dim,
+            nhead=num_heads,
+            dim_feedforward=fusion_dim * 4,
             dropout=dropout,
-            batch_first=True,       # (B, seq, dim) convention
-        )
-        self.norm1 = nn.LayerNorm(fusion_dim)
-
-        # Feed-forward MLP
-        self.mlp = nn.Sequential(
-            nn.Linear(fusion_dim, fusion_dim * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(fusion_dim * 2, fusion_dim),
-        )
-        self.norm2 = nn.LayerNorm(fusion_dim)
-
-        # Self-attention over the concatenated pair (optional refinement)
-        self.self_attn = nn.MultiheadAttention(
-            embed_dim=fusion_dim,
-            num_heads=num_heads,
-            dropout=dropout,
+            activation="gelu",
             batch_first=True,
+            norm_first=True,
         )
-        self.norm3 = nn.LayerNorm(fusion_dim)
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=2,
+            norm=nn.LayerNorm(fusion_dim),
+        )
 
-        # Classifier head
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(fusion_dim, 1)
 
         self._init_weights()
 
-    def _init_weights(self):
+    def _init_weights(self) -> None:
         nn.init.xavier_uniform_(self.proj_spatial.weight)
-        nn.init.xavier_uniform_(self.proj_freq.weight)
         nn.init.zeros_(self.proj_spatial.bias)
+        nn.init.xavier_uniform_(self.proj_freq.weight)
         nn.init.zeros_(self.proj_freq.bias)
+        nn.init.normal_(self.cls_token, std=0.02)
+        nn.init.normal_(self.pos_embed, std=0.02)
         nn.init.xavier_uniform_(self.classifier.weight)
         nn.init.zeros_(self.classifier.bias)
 
@@ -120,27 +97,17 @@ class CrossAttentionViT(nn.Module):
 
         Returns
         -------
-        logits : (B, 1)  — raw logits (apply sigmoid externally for probabilities)
+        logits : (B, 1) — raw logits
         """
-        B = spatial_feat.size(0)
+        batch_size = spatial_feat.size(0)
 
-        # Project to fusion_dim and add position embeddings
-        q = self.proj_spatial(spatial_feat).unsqueeze(1) + self.pos_spatial  # (B, 1, D)
-        kv = self.proj_freq(freq_feat).unsqueeze(1)      + self.pos_freq      # (B, 1, D)
+        spatial_token = self.proj_spatial(spatial_feat).unsqueeze(1)  # (B, 1, D)
+        freq_token = self.proj_freq(freq_feat).unsqueeze(1)            # (B, 1, D)
+        cls_token = self.cls_token.expand(batch_size, -1, -1)          # (B, 1, D)
 
-        # Cross-attention: spatial queries attend to frequency context
-        attn_out, _ = self.cross_attn(query=q, key=kv, value=kv)             # (B, 1, D)
-        q = self.norm1(q + attn_out)                                          # residual
+        tokens = torch.cat([cls_token, spatial_token, freq_token], dim=1)
+        tokens = tokens + self.pos_embed
+        encoded = self.encoder(tokens)
 
-        # MLP block
-        q = self.norm2(q + self.mlp(q))                                       # (B, 1, D)
-
-        # Self-attention over [spatial, freq] pair (captures joint context)
-        pair = torch.cat([q, kv], dim=1)                                      # (B, 2, D)
-        pair_out, _ = self.self_attn(pair, pair, pair)
-        pair = self.norm3(pair + pair_out)
-
-        # Use the spatial (first) token as the final representation
-        cls_token = pair[:, 0, :]                                             # (B, D)
-
-        return self.classifier(self.dropout(cls_token))                       # (B, 1)
+        cls_rep = encoded[:, 0, :]
+        return self.classifier(self.dropout(cls_rep))
