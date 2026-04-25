@@ -162,6 +162,13 @@ class MetricAccumulator:
             self._probs.extend(probs.numpy().tolist())
             self._labels.extend(labels.detach().cpu().view(-1).numpy().tolist())
 
+    def update_probs(self, probs: "torch.Tensor", labels: "torch.Tensor") -> None:
+        import torch
+        with torch.no_grad():
+            probs = probs.detach().cpu().float().view(-1).clamp(0.0, 1.0)
+            self._probs.extend(probs.numpy().tolist())
+            self._labels.extend(labels.detach().cpu().view(-1).numpy().tolist())
+
     def compute(self, threshold: float = 0.5) -> dict:
         return compute_metrics(
             np.array(self._labels),

@@ -271,7 +271,8 @@ class FaceForensicsDataset(Dataset):
     frames_per_clip : int
         Number of frames to randomly sample per video *per item*.
         ``1`` is the standard frame-level setting. Values ``>1`` average
-        multiple sampled frames into one tensor before the model sees them.
+        multiple sampled frames into one tensor before the model sees them,
+        unless ``return_clip=True``.
     deterministic_sampling : bool
         When True, select a fixed set of frames for each clip instead of
         random sampling. Intended for stable validation/test evaluation.
@@ -279,6 +280,9 @@ class FaceForensicsDataset(Dataset):
         ``"random"``, ``"center"``, or ``"uniform"``.
     image_size : int
         Spatial resize target.
+    return_clip : bool
+        When True, return a fixed stack of sampled frames shaped
+        ``(frames_per_clip, C, H, W)`` for video-level evaluation.
     """
 
     def __init__(
@@ -298,9 +302,11 @@ class FaceForensicsDataset(Dataset):
         subset_seed: int = 42,
         deterministic_sampling: bool = False,
         frame_selection_strategy: str = "random",
+        return_clip: bool = False,
     ):
         self.split = split
         self.frames_per_clip = frames_per_clip
+        self.return_clip = bool(return_clip)
         self.transform = get_transforms(split, image_size)
         self.split_ratios = split_ratios or {"train": 0.72, "val": 0.14, "test": 0.14}
         self.split_mode = split_mode
@@ -400,7 +406,8 @@ class FaceForensicsDataset(Dataset):
 
     def _select_frame_paths(self, frame_paths: List[str]) -> List[str]:
         """Choose frame paths according to the dataset sampling policy."""
-        num_frames = min(self.frames_per_clip, len(frame_paths))
+        target_frames = max(1, int(self.frames_per_clip))
+        num_frames = min(target_frames, len(frame_paths))
         if num_frames <= 0:
             return []
 
@@ -423,6 +430,13 @@ class FaceForensicsDataset(Dataset):
         indices = _uniform_indices(len(frame_paths), num_frames)
         return [frame_paths[i] for i in indices]
 
+    def _pad_frame_paths(self, chosen: List[str]) -> List[str]:
+        """Repeat the last selected frame so clip batches have fixed length."""
+        target_frames = max(1, int(self.frames_per_clip))
+        if not chosen or len(chosen) >= target_frames:
+            return chosen
+        return chosen + [chosen[-1]] * (target_frames - len(chosen))
+
     def __getitem__(self, idx: int):
         video_dir, label, method, video_id = self.samples[idx]
         frame_paths = self._frame_paths_by_video.get(video_dir)
@@ -439,16 +453,19 @@ class FaceForensicsDataset(Dataset):
 
         # Training stays stochastic; validation/test can use fixed frame choices.
         chosen = self._select_frame_paths(frame_paths)
+        if self.return_clip:
+            chosen = self._pad_frame_paths(chosen)
         frames = [self.transform(Image.open(p).convert("RGB")) for p in chosen]
 
-        # Return the mean frame tensor (temporal pooling at the data level)
-        image = torch.stack(frames).mean(dim=0)
+        frame_tensor = torch.stack(frames)
+        image = frame_tensor if self.return_clip else frame_tensor.mean(dim=0)
         meta = {
             "method": method,
             "video_id": video_id,
             "video_dir": video_dir,
             "split": self.split,
             "num_frames_used": len(chosen),
+            "video_eval": self.return_clip,
         }
         return image, torch.tensor(label, dtype=torch.float32), meta
 
@@ -494,6 +511,7 @@ class DummyFaceForensicsDataset(Dataset):
             "video_dir": "",
             "split": self.split,
             "num_frames_used": 1,
+            "video_eval": False,
         }
         return self._images[idx], self._labels[idx], meta
 
@@ -540,6 +558,7 @@ def build_dataloaders(
     eval_cfg = train_cfg.get("evaluation", {})
     deterministic_eval = bool(eval_cfg.get("deterministic_eval", True))
     eval_frames_per_clip = int(eval_cfg.get("eval_frames_per_clip", 1))
+    video_eval = bool(eval_cfg.get("video_eval", False))
     eval_frame_strategy = eval_cfg.get("eval_frame_strategy")
     if eval_frame_strategy is None:
         eval_frame_strategy = "center" if eval_frames_per_clip == 1 else "uniform"
@@ -623,6 +642,7 @@ def build_dataloaders(
             subset_seed=int(ablation_cfg.get("subset_seed", 42)),
             deterministic_sampling=deterministic_eval,
             frame_selection_strategy=eval_frame_strategy,
+            return_clip=video_eval,
         )
         test_ds = FaceForensicsDataset(
             frames_dir=frames_dir, split="test", methods=existing_methods,
@@ -637,6 +657,7 @@ def build_dataloaders(
             subset_seed=int(ablation_cfg.get("subset_seed", 42)),
             deterministic_sampling=deterministic_eval,
             frame_selection_strategy=eval_frame_strategy,
+            return_clip=video_eval,
         )
 
     common_kwargs = dict(

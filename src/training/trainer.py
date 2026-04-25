@@ -373,14 +373,28 @@ class Trainer:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
-            with torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled):
-                logits = self.model(images)
-                loss   = self.criterion(logits, labels)
+            if images.ndim == 5:
+                batch_size, frames_per_clip, channels, height, width = images.shape
+                flat_images = images.reshape(batch_size * frames_per_clip, channels, height, width)
+                flat_labels = labels.repeat_interleave(frames_per_clip)
 
-            total_loss += loss.item()
+                with torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled):
+                    flat_logits = self.model(flat_images).view(batch_size, frames_per_clip)
+                    frame_loss = self.criterion(flat_logits.view(-1), flat_labels)
+
+                clip_probs = torch.sigmoid(flat_logits.detach().float().clamp(-50.0, 50.0)).mean(dim=1)
+                total_loss += frame_loss.item()
+                accumulator.update_probs(clip_probs, labels)
+                prediction_rows.extend(self._prediction_rows_from_probs(clip_probs, labels, metadata))
+            else:
+                with torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled):
+                    logits = self.model(images)
+                    loss   = self.criterion(logits, labels)
+
+                total_loss += loss.item()
+                accumulator.update(logits, labels)
+                prediction_rows.extend(self._prediction_rows(logits, labels, metadata))
             n_batches  += 1
-            accumulator.update(logits, labels)
-            prediction_rows.extend(self._prediction_rows(logits, labels, metadata))
 
         metrics = accumulator.compute(threshold=eval_threshold)
         metrics["loss"] = total_loss / max(n_batches, 1)
@@ -507,6 +521,10 @@ class Trainer:
 
     def _prediction_rows(self, logits, labels, metadata) -> list:
         probs = torch.sigmoid(logits.detach().cpu().float().clamp(-50.0, 50.0)).view(-1)
+        return self._prediction_rows_from_probs(probs, labels, metadata)
+
+    def _prediction_rows_from_probs(self, probs, labels, metadata) -> list:
+        probs = probs.detach().cpu().float().view(-1).clamp(0.0, 1.0)
         labels_cpu = labels.detach().cpu().view(-1)
         rows = []
         for i, (label, prob) in enumerate(zip(labels_cpu.tolist(), probs.tolist())):

@@ -22,6 +22,12 @@ python train.py --dummy --epochs 2 --batch-size 4
 
 # Evaluate on test set only (no training)
 python train.py --eval-only --resume outputs/checkpoints/best.pt
+
+# Multi-frame eval-only test
+python train.py --eval-only --resume outputs/checkpoints/best.pt --eval-frames 8 --eval-frame-strategy uniform
+
+# True video-level eval: run each frame separately, average probabilities per clip
+python train.py --eval-only --video-eval --resume outputs/checkpoints/best.pt --eval-frames 8 --eval-frame-strategy uniform
 """
 
 import argparse
@@ -78,6 +84,22 @@ def parse_args() -> argparse.Namespace:
         "--real-dir", type=str, default=None,
         help="Name of real folder under extracted frames (default: real)",
     )
+    p.add_argument(
+        "--eval-frames", type=int, default=None,
+        help="Override evaluation.eval_frames_per_clip for val/test loaders",
+    )
+    p.add_argument(
+        "--eval-frame-strategy", choices=["center", "uniform", "random"], default=None,
+        help="Override evaluation.eval_frame_strategy",
+    )
+    p.add_argument(
+        "--video-eval", action="store_true",
+        help="Evaluate clips by averaging per-frame model probabilities",
+    )
+    p.add_argument(
+        "--report-dir", type=str, default=None,
+        help="Override evaluation.report_dir for saved eval reports",
+    )
 
     # Checkpoint
     p.add_argument("--resume",    default=None, help="Path to checkpoint to resume from")
@@ -119,6 +141,14 @@ def apply_cli_overrides(cfg: dict, args: argparse.Namespace) -> dict:
         cfg["data"]["methods"] = [m.strip() for m in args.methods.split(",") if m.strip()]
     if args.real_dir:
         cfg["data"]["real_dir"] = args.real_dir
+    if args.eval_frames is not None:
+        cfg.setdefault("evaluation", {})["eval_frames_per_clip"] = args.eval_frames
+    if args.eval_frame_strategy is not None:
+        cfg.setdefault("evaluation", {})["eval_frame_strategy"] = args.eval_frame_strategy
+    if args.video_eval:
+        cfg.setdefault("evaluation", {})["video_eval"] = True
+    if args.report_dir is not None:
+        cfg.setdefault("evaluation", {})["report_dir"] = args.report_dir
     return cfg
 
 
@@ -144,6 +174,8 @@ def print_model_summary(model) -> None:
 def main() -> None:
     setup_script_logging("train")
     args = parse_args()
+    if args.video_eval and not args.eval_only:
+        raise ValueError("--video-eval is only supported together with --eval-only.")
 
     # --- Config ---
     train_cfg = load_config(args.config)

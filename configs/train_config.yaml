@@ -34,7 +34,7 @@ data:
 
 # ------ Training ------
 training:
-  epochs: 50
+  epochs: 60
   batch_size: 32
   optimizer: adamw                  # adamw | adam | sgd
   lr: 3.0e-4
@@ -42,7 +42,7 @@ training:
   warmup_epochs: 5
   lr_schedule: cosine               # cosine | step | plateau
   gradient_clip: 1.0
-  label_smoothing: 0.1
+  label_smoothing: 0.05
   amp: true                         # mixed-precision (fp16) — requires CUDA
 
 # ------ Evaluation ------
