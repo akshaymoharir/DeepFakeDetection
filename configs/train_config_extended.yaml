@@ -46,11 +46,16 @@ training:
 
 evaluation:
   decision_threshold: 0.5
+  deterministic_eval: true
+  eval_frames_per_clip: 1
+  eval_frame_strategy: center
   optimize_threshold: true
-  threshold_metric: f1
+  threshold_metric: balanced_accuracy
   threshold_min: 0.05
   threshold_max: 0.95
   threshold_step: 0.01
+  save_reports: true
+  report_dir: outputs/evaluation_extended
 
 # ------ Checkpoints ------
 checkpoints:

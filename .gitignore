@@ -211,7 +211,7 @@ __marimo__/
 # ============================================================
 
 # Raw / extracted data (too large for VCS)
-data/
+/data/
 !data/.gitkeep
 
 # Generated outputs (figures, CSVs, etc.)

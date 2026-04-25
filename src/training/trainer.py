@@ -24,6 +24,7 @@ Usage (called from train.py)
 """
 
 import csv
+import json
 import math
 import os
 import time
@@ -44,7 +45,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from src.training.losses import build_criterion
-from src.training.metrics import MetricAccumulator
+from src.training.metrics import MetricAccumulator, compute_metrics
 
 
 # ------------------------------------------------------------------ #
@@ -100,6 +101,9 @@ class Trainer:
         self.threshold_min = float(ev_cfg.get("threshold_min", 0.05))
         self.threshold_max = float(ev_cfg.get("threshold_max", 0.95))
         self.threshold_step = float(ev_cfg.get("threshold_step", 0.01))
+        self.report_dir = ev_cfg.get("report_dir", "outputs/evaluation")
+        self.save_reports = bool(ev_cfg.get("save_reports", True))
+        os.makedirs(self.report_dir, exist_ok=True)
 
         # ---- Checkpointing ----
         self.ckpt_dir      = ck_cfg["dir"]
@@ -270,7 +274,8 @@ class Trainer:
         n_batches   = 0
 
         pbar = tqdm(loader, desc=f"Epoch {epoch+1:03d} [train]", leave=False, ncols=100)
-        for batch_idx, (images, labels) in enumerate(pbar):
+        for batch_idx, batch in enumerate(pbar):
+            images, labels, _ = self._unpack_batch(batch)
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
@@ -318,7 +323,8 @@ class Trainer:
         n_batches   = 0
 
         pbar = tqdm(loader, desc=f"Epoch {epoch+1:03d} [val]  ", leave=False, ncols=100)
-        for images, labels in pbar:
+        for batch in pbar:
+            images, labels, _ = self._unpack_batch(batch)
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
@@ -356,12 +362,14 @@ class Trainer:
         """Evaluate on a held-out test set and return metrics dict."""
         self.model.eval()
         accumulator = MetricAccumulator()
+        prediction_rows = []
         total_loss  = 0.0
         n_batches   = 0
         eval_threshold = self.best_threshold if threshold is None else float(threshold)
 
         print("\n▶ Evaluating on test set …")
-        for images, labels in tqdm(loader, desc="  Test", ncols=100):
+        for batch in tqdm(loader, desc="  Test", ncols=100):
+            images, labels, metadata = self._unpack_batch(batch)
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
@@ -372,6 +380,7 @@ class Trainer:
             total_loss += loss.item()
             n_batches  += 1
             accumulator.update(logits, labels)
+            prediction_rows.extend(self._prediction_rows(logits, labels, metadata))
 
         metrics = accumulator.compute(threshold=eval_threshold)
         metrics["loss"] = total_loss / max(n_batches, 1)
@@ -381,10 +390,27 @@ class Trainer:
             for key, value in fixed_metrics.items():
                 metrics[f"default_{key}"] = value
 
+        per_method_rows = self._per_method_metrics(prediction_rows, eval_threshold)
+        if self.save_reports:
+            self._write_eval_reports(metrics, per_method_rows, prediction_rows)
+
         print("\n  ── Test Results ──────────────────────")
         for k, v in metrics.items():
-            print(f"    {k:12s}: {v:.4f}")
+            if isinstance(v, (int, float)):
+                print(f"    {k:20s}: {v:.4f}")
         print("  ──────────────────────────────────────\n")
+        if per_method_rows:
+            print("  Per-method ROC-AUC:")
+            for row in per_method_rows:
+                if row["method"] == "all":
+                    continue
+                print(
+                    f"    {row['method']:16s} "
+                    f"AUC={row['roc_auc']:.4f}  "
+                    f"AP={row['average_precision']:.4f}  "
+                    f"BalAcc={row['balanced_accuracy']:.4f}"
+                )
+            print()
         return metrics
 
     # ------------------------------------------------------------------
@@ -454,6 +480,132 @@ class Trainer:
         return self.epochs_no_imp >= self.patience
 
     # ------------------------------------------------------------------
+    #  Batch / report helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _unpack_batch(batch):
+        if len(batch) == 2:
+            images, labels = batch
+            return images, labels, None
+        if len(batch) == 3:
+            images, labels, metadata = batch
+            return images, labels, metadata
+        raise ValueError(f"Expected batch with 2 or 3 items, got {len(batch)}.")
+
+    @staticmethod
+    def _meta_at(metadata, key: str, index: int, default=None):
+        if metadata is None or key not in metadata:
+            return default
+        value = metadata[key]
+        if torch.is_tensor(value):
+            item = value[index]
+            return item.item() if item.ndim == 0 else item.tolist()
+        if isinstance(value, (list, tuple)):
+            return value[index]
+        return value
+
+    def _prediction_rows(self, logits, labels, metadata) -> list:
+        probs = torch.sigmoid(logits.detach().cpu().float().clamp(-50.0, 50.0)).view(-1)
+        labels_cpu = labels.detach().cpu().view(-1)
+        rows = []
+        for i, (label, prob) in enumerate(zip(labels_cpu.tolist(), probs.tolist())):
+            rows.append({
+                "label": int(label),
+                "prob": float(prob),
+                "method": self._meta_at(metadata, "method", i, "unknown"),
+                "video_id": self._meta_at(metadata, "video_id", i, ""),
+                "video_dir": self._meta_at(metadata, "video_dir", i, ""),
+                "split": self._meta_at(metadata, "split", i, ""),
+                "num_frames_used": int(self._meta_at(metadata, "num_frames_used", i, 1)),
+            })
+        return rows
+
+    @staticmethod
+    def _per_method_metrics(prediction_rows: list, threshold: float) -> list:
+        if not prediction_rows:
+            return []
+
+        labels = [row["label"] for row in prediction_rows]
+        probs = [row["prob"] for row in prediction_rows]
+        all_metrics = compute_metrics(labels, probs, threshold=threshold)
+        rows = [{
+            "method": "all",
+            "n_real": int(sum(label == 0 for label in labels)),
+            "n_fake": int(sum(label == 1 for label in labels)),
+            **all_metrics,
+        }]
+
+        fake_methods = sorted({
+            row["method"]
+            for row in prediction_rows
+            if row["label"] == 1
+        })
+        for method in fake_methods:
+            subset = [
+                row for row in prediction_rows
+                if row["label"] == 0 or row["method"] == method
+            ]
+            method_labels = [row["label"] for row in subset]
+            method_probs = [row["prob"] for row in subset]
+            method_metrics = compute_metrics(method_labels, method_probs, threshold=threshold)
+            rows.append({
+                "method": method,
+                "n_real": int(sum(label == 0 for label in method_labels)),
+                "n_fake": int(sum(label == 1 for label in method_labels)),
+                **method_metrics,
+            })
+        return rows
+
+    @staticmethod
+    def _json_ready(value):
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        if isinstance(value, dict):
+            return {k: Trainer._json_ready(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [Trainer._json_ready(v) for v in value]
+        return value
+
+    def _write_eval_reports(self, metrics: dict, per_method_rows: list, prediction_rows: list) -> None:
+        os.makedirs(self.report_dir, exist_ok=True)
+
+        metrics_path = os.path.join(self.report_dir, "test_metrics.json")
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump(self._json_ready(metrics), f, indent=2, sort_keys=True)
+
+        confusion_path = os.path.join(self.report_dir, "test_confusion_matrix.csv")
+        confusion_fields = ["threshold", "tn", "fp", "fn", "tp"]
+        with open(confusion_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=confusion_fields)
+            writer.writeheader()
+            writer.writerow({
+                "threshold": metrics.get("threshold", self.default_threshold),
+                "tn": metrics.get("tn", 0),
+                "fp": metrics.get("fp", 0),
+                "fn": metrics.get("fn", 0),
+                "tp": metrics.get("tp", 0),
+            })
+
+        if per_method_rows:
+            per_method_path = os.path.join(self.report_dir, "test_per_method.csv")
+            fields = list(per_method_rows[0].keys())
+            with open(per_method_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(self._json_ready(per_method_rows))
+
+        if prediction_rows:
+            predictions_path = os.path.join(self.report_dir, "test_predictions.csv")
+            fields = list(prediction_rows[0].keys())
+            with open(predictions_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(prediction_rows)
+
+        print(f"  Evaluation reports saved to {self.report_dir}")
+
+    # ------------------------------------------------------------------
     #  Logging helpers
     # ------------------------------------------------------------------
 
@@ -468,6 +620,7 @@ class Trainer:
             f"LR={lr:.2e}  "
             f"Train loss={tr_loss:.4f}  AUC={tr_m.get('roc_auc',float('nan')):.4f}  "
             f"| Val loss={vl_loss:.4f}  AUC={vl_m.get('roc_auc',float('nan')):.4f}  "
+            f"BalAcc@0.50={vl_m.get('balanced_accuracy',0):.4f}  "
             f"F1@0.50={vl_m.get('f1',0):.4f}  "
             f"T*={vl_m.get('optimal_threshold', self.default_threshold):.2f}  "
             f"{self.threshold_metric.upper()}*={vl_m.get(f'optimal_{self.threshold_metric}', vl_m.get(self.threshold_metric, 0)):.4f}  "

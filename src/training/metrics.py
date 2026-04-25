@@ -16,8 +16,12 @@ accuracy     Accuracy at threshold 0.5.
 
 import numpy as np
 from sklearn.metrics import (
+    average_precision_score,
+    balanced_accuracy_score,
+    confusion_matrix,
     roc_auc_score,
     f1_score,
+    matthews_corrcoef,
     precision_score,
     recall_score,
     accuracy_score,
@@ -39,7 +43,7 @@ def compute_metrics(
 
     Returns
     -------
-    dict with keys: roc_auc, f1, precision, recall, accuracy
+    dict with ranking metrics, thresholded metrics, and confusion counts.
     """
     labels = np.asarray(all_labels, dtype=int)
     probs  = np.asarray(all_probs,  dtype=float)
@@ -47,19 +51,38 @@ def compute_metrics(
     probs  = np.nan_to_num(probs, nan=0.5, posinf=1.0, neginf=0.0)
     preds  = (probs >= threshold).astype(int)
 
-    # ROC-AUC requires at least one sample of each class
+    # Ranking metrics require at least one sample of each class.
     n_classes = len(np.unique(labels))
     if n_classes < 2:
         roc_auc = float("nan")
+        average_precision = float("nan")
     else:
         roc_auc = float(roc_auc_score(labels, probs))
+        average_precision = float(average_precision_score(labels, probs))
+
+    tn, fp, fn, tp = confusion_matrix(labels, preds, labels=[0, 1]).ravel()
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    recall = recall_score(labels, preds, zero_division=0)
+    balanced_accuracy = balanced_accuracy_score(labels, preds)
+    youden_j = recall + specificity - 1.0
 
     return {
-        "roc_auc":   roc_auc,
-        "f1":        float(f1_score(labels, preds, zero_division=0)),
-        "precision": float(precision_score(labels, preds, zero_division=0)),
-        "recall":    float(recall_score(labels, preds, zero_division=0)),
-        "accuracy":  float(accuracy_score(labels, preds)),
+        "roc_auc":             roc_auc,
+        "average_precision":   average_precision,
+        "f1":                  float(f1_score(labels, preds, zero_division=0)),
+        "precision":           float(precision_score(labels, preds, zero_division=0)),
+        "recall":              float(recall),
+        "specificity":         float(specificity),
+        "balanced_accuracy":   float(balanced_accuracy),
+        "accuracy":            float(accuracy_score(labels, preds)),
+        "mcc":                 float(matthews_corrcoef(labels, preds)),
+        "youden_j":            float(youden_j),
+        "predicted_fake_rate": float(np.mean(preds)),
+        "true_fake_rate":      float(np.mean(labels)),
+        "tn":                  int(tn),
+        "fp":                  int(fp),
+        "fn":                  int(fn),
+        "tp":                  int(tp),
     }
 
 
@@ -80,7 +103,17 @@ def find_best_threshold(
         raise ValueError("Cannot optimize threshold with zero samples.")
 
     metric = metric.lower()
-    if metric not in {"f1", "precision", "recall", "accuracy"}:
+    valid_metrics = {
+        "f1",
+        "precision",
+        "recall",
+        "specificity",
+        "balanced_accuracy",
+        "accuracy",
+        "mcc",
+        "youden_j",
+    }
+    if metric not in valid_metrics:
         raise ValueError(f"Unsupported threshold metric: {metric}")
 
     best = None
