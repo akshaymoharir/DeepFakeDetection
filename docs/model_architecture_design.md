@@ -4,10 +4,10 @@
 
 This document describes the implemented model architecture in this repository at a layer-by-layer level. It focuses on the design currently defined in:
 
-- [src/models/hsf_cvit.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/models/hsf_cvit.py)
-- [src/models/efficientnet_branch.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/models/efficientnet_branch.py)
-- [src/models/srm_filter.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/models/srm_filter.py)
-- [src/models/cross_attention_vit.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/models/cross_attention_vit.py)
+- [src/models/hsf_cvit.py](../src/models/hsf_cvit.py)
+- [src/models/efficientnet_branch.py](../src/models/efficientnet_branch.py)
+- [src/models/srm_filter.py](../src/models/srm_filter.py)
+- [src/models/cross_attention_vit.py](../src/models/cross_attention_vit.py)
 
 The model is named `HSF-CVIT`, short for `Hybrid Spatial-Frequency Cross-Attention Vision Transformer`.
 
@@ -35,7 +35,7 @@ These views are encoded independently and fused late through attention. The late
 
 At the highest level, the model takes a single RGB image tensor shaped `(B, 3, H, W)` and produces a binary classification logit shaped `(B, 1)`.
 
-Default configuration from [configs/train_config.yaml](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/configs/train_config.yaml):
+Default configuration from [configs/train_config.yaml](../configs/train_config.yaml):
 
 - `spatial_out_dim = 512`
 - `freq_out_dim = 256`
@@ -66,11 +66,11 @@ With the default config and a standard input size of `224 x 224`, the tensor flo
 7. Select first token: `(B, 256)`
 8. Final classifier output: `(B, 1)`
 
-The model returns raw logits, not probabilities. During training, the logits are consumed by `BCEWithLogitsLoss` via [src/training/losses.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/training/losses.py). For inference, probabilities are obtained with `torch.sigmoid(logits)`.
+The model returns raw logits, not probabilities. During training, the logits are consumed by `BCEWithLogitsLoss` via [src/training/losses.py](../src/training/losses.py). For inference, probabilities are obtained with `torch.sigmoid(logits)`.
 
 ## 4. Spatial Branch Design
 
-Implementation: [src/models/efficientnet_branch.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/models/efficientnet_branch.py)
+Implementation: [src/models/efficientnet_branch.py](../src/models/efficientnet_branch.py)
 
 ### 4.1 Purpose
 
@@ -123,7 +123,7 @@ This branch is the model's main source of content-aware understanding.
 
 The spatial backbone can be frozen and unfrozen through helper methods exposed by the branch and called by the trainer.
 
-Training behavior from [src/training/trainer.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/training/trainer.py):
+Training behavior from [src/training/trainer.py](../src/training/trainer.py):
 
 - the EfficientNet backbone is frozen for the first `freeze_spatial_epochs`,
 - only the non-frozen parts effectively update during that warm-up,
@@ -137,7 +137,7 @@ Design rationale:
 
 ## 5. Frequency Branch Design
 
-Implementation: [src/models/srm_filter.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/models/srm_filter.py)
+Implementation: [src/models/srm_filter.py](../src/models/srm_filter.py)
 
 ### 5.1 Purpose
 
@@ -234,7 +234,7 @@ In short, the spatial branch asks "does this image look fake?" while the frequen
 
 ## 6. Fusion Head Design
 
-Implementation: [src/models/cross_attention_vit.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/models/cross_attention_vit.py)
+Implementation: [src/models/cross_attention_vit.py](../src/models/cross_attention_vit.py)
 
 ### 6.1 Purpose
 
@@ -464,7 +464,7 @@ Although the trainer is separate from the model, several training choices are cl
 
 ### 9.1 Loss
 
-From [src/training/losses.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/training/losses.py), training uses binary cross-entropy with logits, optional label smoothing, and optional class weighting.
+From [src/training/losses.py](../src/training/losses.py), training uses binary cross-entropy with logits, optional label smoothing, and optional class weighting.
 
 Default smoothing:
 
