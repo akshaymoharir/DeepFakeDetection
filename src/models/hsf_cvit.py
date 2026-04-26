@@ -32,7 +32,7 @@ import torch
 import torch.nn as nn
 
 from src.models.efficientnet_branch import EfficientNetSpatialBranch
-from src.models.srm_filter import SRMFrequencyBranch
+from src.models.swt_filter import SWTFrequencyBranch
 from src.models.cross_attention_vit import CrossAttentionViT
 
 
@@ -72,7 +72,7 @@ class HSF_CVIT(nn.Module):
             dropout=dropout,
         )
 
-        self.freq_branch = SRMFrequencyBranch(
+        self.freq_branch = SWTFrequencyBranch(
             out_dim=freq_out_dim,
         )
 
