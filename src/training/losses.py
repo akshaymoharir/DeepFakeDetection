@@ -61,5 +61,8 @@ class SmoothedBCELoss(nn.Module):
 
 def build_criterion(train_cfg: dict) -> SmoothedBCELoss:
     """Build the loss function from a training config dict."""
-    smoothing = train_cfg["training"].get("label_smoothing", 0.1)
-    return SmoothedBCELoss(smoothing=smoothing)
+    smoothing  = train_cfg["training"].get("label_smoothing", 0.1)
+    pos_weight = train_cfg["training"].get("pos_weight", None)
+    if pos_weight is not None:
+        pos_weight = float(pos_weight)
+    return SmoothedBCELoss(smoothing=smoothing, pos_weight=pos_weight)

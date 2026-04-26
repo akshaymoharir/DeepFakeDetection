@@ -18,7 +18,8 @@ model:
 # ------ Data ------
 data:
   config: configs/dataset_config.yaml
-  frames_per_clip: 1                # standard frame-level training: one sampled frame per clip per item
+  frames_per_clip: 1                # frames averaged per sample (keep 1 — averaging washes artifacts)
+  train_items_per_clip: 8           # repeat each clip N times so each epoch sees N different random frames per video
   image_size: 224
   num_workers: 8
   pin_memory: true
@@ -43,6 +44,7 @@ training:
   lr_schedule: cosine               # cosine | step | plateau
   gradient_clip: 1.0
   label_smoothing: 0.05
+  pos_weight: 1.3                   # upweight missed fakes in BCE to push output probabilities higher
   amp: true                         # mixed-precision (fp16) — requires CUDA
 
 # ------ Evaluation ------
@@ -63,7 +65,7 @@ evaluation:
 checkpoints:
   dir: outputs/checkpoints
   save_every: 5                     # epochs between periodic saves
-  early_stop_patience: 10           # stop if val AUC doesn't improve for N epochs
+  early_stop_patience: 15           # stop if val AUC doesn't improve for N epochs
   keep_last: 3                      # keep only the last N periodic checkpoints
 
 # ------ Logging ------

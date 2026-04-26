@@ -303,6 +303,7 @@ class FaceForensicsDataset(Dataset):
         deterministic_sampling: bool = False,
         frame_selection_strategy: str = "random",
         return_clip: bool = False,
+        items_per_clip: int = 1,
     ):
         self.split = split
         self.frames_per_clip = frames_per_clip
@@ -356,6 +357,12 @@ class FaceForensicsDataset(Dataset):
             [(d, 0, real_dir_name, Path(d).name) for d in real_dirs] +
             fake_samples
         )
+
+        # Repeat each clip entry so that one epoch sees items_per_clip
+        # independently-sampled frames per video.  Only applied during
+        # training (deterministic_sampling=False); val/test pass 1.
+        if items_per_clip > 1 and not self.deterministic_sampling:
+            self.samples = self.samples * items_per_clip
 
         if len(real_dirs) == 0 or len(fake_samples) == 0:
             raise RuntimeError(
@@ -555,6 +562,7 @@ def build_dataloaders(
     )
     split_mode = dataset_cfg.get("faceforensics", {}).get("split_mode", "numeric")
     balance_strategy = data_cfg.get("balance_strategy", "none").lower()
+    train_items_per_clip = int(data_cfg.get("train_items_per_clip", 1))
     eval_cfg = train_cfg.get("evaluation", {})
     deterministic_eval = bool(eval_cfg.get("deterministic_eval", True))
     eval_frames_per_clip = int(eval_cfg.get("eval_frames_per_clip", 1))
@@ -628,6 +636,7 @@ def build_dataloaders(
             subset_seed=int(ablation_cfg.get("subset_seed", 42)),
             deterministic_sampling=False,
             frame_selection_strategy="random",
+            items_per_clip=train_items_per_clip,
         )
         val_ds = FaceForensicsDataset(
             frames_dir=frames_dir, split="val", methods=existing_methods,

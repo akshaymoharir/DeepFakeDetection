@@ -217,9 +217,13 @@ def main() -> None:
         train_cfg=train_cfg,
         dummy=args.dummy,
     )
-    print(f"  train={len(train_loader.dataset):,}  "
-          f"val={len(val_loader.dataset):,}  "
-          f"test={len(test_loader.dataset):,} samples")
+    items_per_clip = train_cfg["data"].get("train_items_per_clip", 1)
+    print(
+        f"  train={len(train_loader.dataset):,}  "
+        f"val={len(val_loader.dataset):,}  "
+        f"test={len(test_loader.dataset):,} samples"
+        + (f"  (×{items_per_clip} items/clip)" if items_per_clip > 1 and not args.dummy else "")
+    )
 
     # --- Build model ---
     print("\n▶ Building HSF-CVIT model …")
