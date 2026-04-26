@@ -464,18 +464,22 @@ Although the trainer is separate from the model, several training choices are cl
 
 ### 9.1 Loss
 
-From [src/training/losses.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/training/losses.py), training uses binary cross-entropy with logits and optional label smoothing.
+From [src/training/losses.py](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/src/training/losses.py), training uses binary cross-entropy with logits, optional label smoothing, and optional class weighting.
 
 Default smoothing:
 
-- `label_smoothing = 0.1`
+- `label_smoothing = 0.05`
 
 Smoothed targets become:
 
-- real `0` becomes `0.05`
-- fake `1` becomes `0.95`
+- real `0` becomes `0.025`
+- fake `1` becomes `0.975`
 
-This reduces overconfidence and can improve robustness to noisy labels.
+Default class weighting:
+
+- `pos_weight = 1.3`
+
+This multiplies the BCE loss gradient for the fake (positive) class by 1.3, nudging the model toward higher fake probabilities and keeping the calibrated decision threshold near 0.5. The label smoothing reduces overconfidence and improves robustness to noisy labels.
 
 ### 9.2 Optimizer
 
@@ -551,9 +555,9 @@ The SRM stage may improve robustness to some artifacts, but it can also bias the
 
 The classifier uses the first token after refinement. That means the final representation is still primarily organized around the spatial stream, even though it has been conditioned on frequency evidence.
 
-### 12.4 Data loader implementation is not visible here
+### 12.4 Frame-level processing only
 
-The training entrypoint imports `src.data.dataset.build_dataloaders`, but that module is not present in the visible tracked source tree reviewed for this document. The model description in this document is still accurate, but full data-pipeline behavior cannot be verified from the visible workspace snapshot alone.
+The dataset returns single frames (or averaged frame stacks for multi-frame settings). The model has no temporal component — frames from the same video are processed independently. Video-level inference improves accuracy by averaging per-frame probabilities, but temporal consistency signals are not exploited architecturally.
 
 ## 13. Summary
 

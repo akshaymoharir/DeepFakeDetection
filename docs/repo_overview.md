@@ -60,15 +60,15 @@ The repository is oriented around two commonly used deepfake datasets:
 The FaceForensics++ configuration supports:
 
 - real videos from YouTube originals,
-- optionally actor sequences as additional real data,
-- multiple manipulation methods, including `Deepfakes`, `Face2Face`, `FaceShifter`, and `DeepFakeDetection`,
-- configurable compression settings such as `c23`.
+- multiple manipulation methods — the standard four are `Deepfakes`, `Face2Face`, `FaceSwap`, and `NeuralTextures`; the extended config also includes `FaceShifter` and `DeepFakeDetection`,
+- configurable compression settings such as `c23`,
+- official pair-based split assignment using `configs/ffpp_splits/` JSON files.
 
 The frame extraction flow saves frames into class-specific folders such as:
 
-- `data/frames/real/...`
-- `data/frames/Deepfakes/...`
-- `data/frames/Face2Face/...`
+- `data/frames_ffpp_standard/real/...`
+- `data/frames_ffpp_standard/Deepfakes/...`
+- `data/frames_ffpp_standard/Face2Face/...`
 
 This layout is intended to make downstream dataset loading straightforward.
 
@@ -156,12 +156,15 @@ Evaluation uses standard binary classification metrics:
 
 The repository is broadly divided as follows:
 
-- `configs/`: experiment and dataset configuration
+- `configs/`: experiment and dataset configuration, FF++ official split JSON files
 - `scripts/`: dataset download, extraction, audit, and synthetic data utilities
-- `src/models/`: model components
+- `src/data/`: dataset class (`FaceForensicsDataset`), augmentation pipelines, dataloader factory
+- `src/models/`: model components (HSF-CVIT, spatial branch, frequency branch, fusion head)
 - `src/training/`: loss, metrics, and trainer
-- `src/utils/`: shared helpers
+- `src/inference/`: `DeepFakeDetector` inference API with face detection support
+- `src/utils/`: shared helpers (seeding, logging, frame extraction)
 - `train.py`: main training entrypoint
+- `predict.py`: command-line inference for single images or video files
 
 ## Configurability
 
@@ -184,9 +187,13 @@ This is important for deepfake detection research, where comparing models and tr
 
 ## Current State and Practical Notes
 
-The repository already contains a substantial training and modeling stack, plus scripts for dataset preparation and audit. It is clearly intended to function as an experimental deepfake detection framework.
+The repository is a complete, end-to-end deepfake detection framework. All major components are implemented and integrated:
 
-At the same time, the current tracked files suggest the data-loading module expected by `train.py` is not present in the visible `src` tree. Specifically, `train.py` imports `src.data.dataset.build_dataloaders`, but there is no tracked `src/data` package in the repository snapshot I reviewed. That means the design and interfaces for full training are present, but the active workspace may still be incomplete unless that module exists outside the tracked files or is added later.
+- `src/data/dataset.py` provides `FaceForensicsDataset` and `build_dataloaders`, including `train_items_per_clip` expansion, `WeightedRandomSampler` balance, and deterministic eval-mode frame selection.
+- `src/data/transforms.py` provides train and val/test augmentation pipelines, including JPEG compression augmentation (quality 60–95, p=0.3).
+- `src/training/losses.py` wires `pos_weight` from the training config into the BCE loss.
+- `src/inference/detector.py` provides `DeepFakeDetector` for image and video inference with face detection.
+- `predict.py` provides command-line inference.
 
 ## Summary
 
