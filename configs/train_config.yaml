@@ -14,14 +14,14 @@ model:
   freq_out_dim: 256                 # projection dim from frequency branch
   fusion_heads: 4                   # cross-attention heads
   fusion_dim: 256                   # internal transformer dim
-  dropout: 0.3
+  dropout: 0.4                      # was 0.3 — bumped for B7 anti-overfit
   srm_learnable: true               # train SRM front-end (init from classical SRM kernels)
 
 # ------ Data ------
 data:
   config: configs/dataset_config.yaml
   frames_per_clip: 1                # frames averaged per sample (keep 1 — averaging washes artifacts)
-  train_items_per_clip: 4           # fast-iteration value; raise to 8 for the final long run
+  train_items_per_clip: 2           # fast-iteration value; raise to 8 for the final long run
   image_size: 380
   num_workers: 8
   pin_memory: true
@@ -37,15 +37,15 @@ data:
 
 # ------ Training ------
 training:
-  epochs: 60
+  epochs: 30                        # was 60 — fast-iteration; raise to 60 for final long run
   batch_size: 16                     # B7 @ 380px on a 24GB GPU; raise to 16 if image_size=320, 32 if backbone=efficientnet_b4
   optimizer: adamw                  # adamw | adam | sgd
   lr: 1.0e-4                        # B7 fine-tunes at ~1e-4; 3e-4 overshoots with bs=8 + fp16 AMP
-  weight_decay: 1.0e-4
-  warmup_epochs: 8                  # longer warmup for the larger backbone
+  weight_decay: 5.0e-4              # was 1e-4 — 5× stronger L2 to fight B7 overfit
+  warmup_epochs: 4                  # was 8 — proportional to shorter run; raise to 8 for final long run
   lr_schedule: cosine               # cosine | step | plateau
   gradient_clip: 1.0
-  label_smoothing: 0.05
+  label_smoothing: 0.10             # was 0.05 — caps confident-wrong predictions (val-loss-climb fix)
   pos_weight: null                   # upweight missed fakes in BCE to push output probabilities higher
   amp: true                         # mixed-precision (fp16) — requires CUDA
 
@@ -67,7 +67,7 @@ evaluation:
 checkpoints:
   dir: outputs/checkpoints
   save_every: 5                     # epochs between periodic saves
-  early_stop_patience: 15           # stop if val AUC doesn't improve for N epochs
+  early_stop_patience: 8            # was 15 — proportional to shorter run; raise to 15 for final long run
   keep_last: 3                      # keep only the last N periodic checkpoints
 
 # ------ Logging ------
