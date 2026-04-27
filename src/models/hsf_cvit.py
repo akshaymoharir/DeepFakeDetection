@@ -79,7 +79,6 @@ class HSF_CVIT(nn.Module):
 
         self.freq_branch = SWTFrequencyBranch(
             out_dim=freq_out_dim,
-            srm_learnable=srm_learnable,
         )
 
         self.fusion_head = CrossAttentionViT(
