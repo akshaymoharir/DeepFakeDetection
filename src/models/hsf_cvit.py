@@ -53,6 +53,8 @@ class HSF_CVIT(nn.Module):
         Dropout rate applied throughout.
     pretrained_spatial : bool
         Whether to load ImageNet weights for the EfficientNet backbone.
+    srm_learnable : bool
+        Whether the SRM front-end kernels are trained end-to-end.
     """
 
     def __init__(
@@ -63,6 +65,8 @@ class HSF_CVIT(nn.Module):
         fusion_heads: int = 4,
         dropout: float = 0.3,
         pretrained_spatial: bool = True,
+        srm_learnable: bool = True,
+        spatial_backbone: str = "tf_efficientnet_b7",
     ):
         super().__init__()
 
@@ -70,10 +74,12 @@ class HSF_CVIT(nn.Module):
             out_dim=spatial_out_dim,
             pretrained=pretrained_spatial,
             dropout=dropout,
+            backbone=spatial_backbone,
         )
 
         self.freq_branch = SRMFrequencyBranch(
             out_dim=freq_out_dim,
+            srm_learnable=srm_learnable,
         )
 
         self.fusion_head = CrossAttentionViT(
@@ -169,4 +175,6 @@ def build_model(train_cfg: dict) -> HSF_CVIT:
         fusion_heads=m.get("fusion_heads", 4),
         dropout=m.get("dropout", 0.3),
         pretrained_spatial=m.get("pretrained_spatial", True),
+        srm_learnable=m.get("srm_learnable", True),
+        spatial_backbone=m.get("spatial_backbone", "tf_efficientnet_b7"),
     )

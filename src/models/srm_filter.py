@@ -5,13 +5,16 @@ src/models/srm_filter.py — SRM Frequency Branch
 Implements the Steganalysis Rich Model (SRM) high-pass filter bank
 followed by a lightweight convolutional encoder.
 
-The SRM kernels are fixed (non-trainable) — they extract manipulation
-artifacts invisible in RGB space. The subsequent encoder is trainable.
+The SRM kernels are initialized with the three classical SRM high-pass
+filters and can either be frozen (fixed forensic prior) or trained
+end-to-end (learnable specialization).  Learnable mode lets the front-end
+adapt to manipulation families (e.g. NeuralTextures) whose artifacts sit
+outside the original SRM frequency band.
 
 Architecture
 ------------
 Input  (B, 3, H, W)
-  → SRMConv2d         (B, 9, H, W)   — 3 kernels × 3 channels, fixed
+  → SRMConv2d         (B, 9, H, W)   — 3 kernels × 3 channels
   → TanH clamp ×10                   — matches original SRM implementation
   → ResidualBlock × 3 (B, 64 → 128 → 256, stride 2)
   → AdaptiveAvgPool2d (B, 256, 1, 1)
@@ -66,25 +69,35 @@ def _build_srm_kernels() -> torch.Tensor:
 
 
 # ------------------------------------------------------------------ #
-#  SRM Convolution — non-trainable
+#  SRM Convolution — learnable by default, fixed when disabled
 # ------------------------------------------------------------------ #
 
 class SRMConv2d(nn.Module):
-    """Apply 3 fixed SRM kernels to each input channel independently.
+    """Apply 3 SRM-initialized kernels to each input channel independently.
 
     Each of the 3 kernels is applied to R, G, B separately, yielding
     9 feature maps total.
+
+    Parameters
+    ----------
+    learnable : bool
+        When True, the kernels are stored as ``nn.Parameter`` and trained
+        end-to-end (initialized with the classical SRM high-pass filters).
+        When False, they are stored as a buffer and stay fixed.
     """
 
-    def __init__(self):
+    def __init__(self, learnable: bool = True):
         super().__init__()
         kernel = _build_srm_kernels()                   # (3, 1, 5, 5)
         # Repeat for each RGB channel via grouped convolution
         # weight shape: (out_ch, in_ch/groups, kH, kW)
         # We want: out_ch=9, groups=3 → each group has 3 filters, 1 in_ch
         # Expand kernels to 3 sets of 3: (9, 1, 5, 5)
-        weight = kernel.repeat(3, 1, 1, 1)              # (9, 1, 5, 5)
-        self.register_buffer("weight", weight)
+        weight = kernel.repeat(3, 1, 1, 1).contiguous()  # (9, 1, 5, 5)
+        if learnable:
+            self.weight = nn.Parameter(weight)
+        else:
+            self.register_buffer("weight", weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, 3, H, W)
@@ -124,18 +137,22 @@ class _ResBlock(nn.Module):
 # ------------------------------------------------------------------ #
 
 class SRMFrequencyBranch(nn.Module):
-    """Fixed SRM filter bank + trainable residual encoder.
+    """SRM-initialized filter bank + trainable residual encoder.
 
     Parameters
     ----------
     out_dim : int
         Dimension of the output feature vector.
+    srm_learnable : bool
+        When True (default), the SRM filter bank is initialized with the
+        classical kernels but trained end-to-end. When False, the kernels
+        stay fixed (legacy behavior).
     """
 
-    def __init__(self, out_dim: int = 256):
+    def __init__(self, out_dim: int = 256, srm_learnable: bool = True):
         super().__init__()
 
-        self.srm = SRMConv2d()                          # fixed, (B, 9, H, W)
+        self.srm = SRMConv2d(learnable=srm_learnable)   # (B, 9, H, W)
 
         # Trainable encoder: 9 → 64 → 128 → 256
         self.encoder = nn.Sequential(

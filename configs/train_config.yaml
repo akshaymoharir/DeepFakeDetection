@@ -7,24 +7,26 @@
 # ------ Model ------
 model:
   name: hsf_cvit
-  pretrained_spatial: true          # download ImageNet weights for EfficientNet-B4
-  freeze_spatial_epochs: 2          # freeze EfficientNet-B4 for first N epochs (warm up freq branch)
+  spatial_backbone: tf_efficientnet_b7  # timm name — tf_efficientnet_b7 (66M) | efficientnet_b4 (18.5M)
+  pretrained_spatial: true          # download ImageNet weights for the spatial backbone
+  freeze_spatial_epochs: 2          # freeze backbone for first N epochs (warm up freq branch)
   spatial_out_dim: 512              # projection dim from spatial branch
   freq_out_dim: 256                 # projection dim from frequency branch
   fusion_heads: 4                   # cross-attention heads
   fusion_dim: 256                   # internal transformer dim
   dropout: 0.3
+  srm_learnable: true               # train SRM front-end (init from classical SRM kernels)
 
 # ------ Data ------
 data:
   config: configs/dataset_config.yaml
   frames_per_clip: 1                # frames averaged per sample (keep 1 — averaging washes artifacts)
-  train_items_per_clip: 8           # repeat each clip N times so each epoch sees N different random frames per video
-  image_size: 224
+  train_items_per_clip: 4           # fast-iteration value; raise to 8 for the final long run
+  image_size: 380
   num_workers: 8
   pin_memory: true
   prefetch_factor: 4
-  balance_strategy: weighted_sampler  # none | weighted_sampler
+  balance_strategy: weighted_sampler  # none | weighted_sampler — required, dataset is 4:1 fake:real
   # FF++ manipulation methods to include (any subset available under data/frames)
   methods:
     - Deepfakes
@@ -36,15 +38,15 @@ data:
 # ------ Training ------
 training:
   epochs: 60
-  batch_size: 32
+  batch_size: 16                     # B7 @ 380px on a 24GB GPU; raise to 16 if image_size=320, 32 if backbone=efficientnet_b4
   optimizer: adamw                  # adamw | adam | sgd
-  lr: 3.0e-4
+  lr: 1.0e-4                        # B7 fine-tunes at ~1e-4; 3e-4 overshoots with bs=8 + fp16 AMP
   weight_decay: 1.0e-4
-  warmup_epochs: 5
+  warmup_epochs: 8                  # longer warmup for the larger backbone
   lr_schedule: cosine               # cosine | step | plateau
   gradient_clip: 1.0
   label_smoothing: 0.05
-  pos_weight: 1.3                   # upweight missed fakes in BCE to push output probabilities higher
+  pos_weight: null                   # upweight missed fakes in BCE to push output probabilities higher
   amp: true                         # mixed-precision (fp16) — requires CUDA
 
 # ------ Evaluation ------

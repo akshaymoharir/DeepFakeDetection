@@ -6,6 +6,7 @@
 # ------ Model ------
 model:
   name: hsf_cvit
+  spatial_backbone: tf_efficientnet_b7
   pretrained_spatial: true
   freeze_spatial_epochs: 2
   spatial_out_dim: 512
@@ -13,6 +14,7 @@ model:
   fusion_heads: 4
   fusion_dim: 256
   dropout: 0.3
+  srm_learnable: true
 
 # ------ Data ------
 data:
@@ -34,7 +36,7 @@ data:
 # ------ Training ------
 training:
   epochs: 50
-  batch_size: 16
+  batch_size: 8                     # B7 backbone — raise if VRAM allows
   optimizer: adamw
   lr: 3.0e-4
   weight_decay: 1.0e-4

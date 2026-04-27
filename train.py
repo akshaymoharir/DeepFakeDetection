@@ -85,6 +85,10 @@ def parse_args() -> argparse.Namespace:
         help="Name of real folder under extracted frames (default: real)",
     )
     p.add_argument(
+        "--items-per-clip", type=int, default=None,
+        help="Override data.train_items_per_clip (lower = faster epochs, less per-epoch frame diversity)",
+    )
+    p.add_argument(
         "--eval-frames", type=int, default=None,
         help="Override evaluation.eval_frames_per_clip for val/test loaders",
     )
@@ -141,6 +145,8 @@ def apply_cli_overrides(cfg: dict, args: argparse.Namespace) -> dict:
         cfg["data"]["methods"] = [m.strip() for m in args.methods.split(",") if m.strip()]
     if args.real_dir:
         cfg["data"]["real_dir"] = args.real_dir
+    if args.items_per_clip is not None:
+        cfg["data"]["train_items_per_clip"] = args.items_per_clip
     if args.eval_frames is not None:
         cfg.setdefault("evaluation", {})["eval_frames_per_clip"] = args.eval_frames
     if args.eval_frame_strategy is not None:
