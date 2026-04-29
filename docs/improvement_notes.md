@@ -7,7 +7,7 @@ This document records practical next steps for improving the implemented project
 - active model: EfficientNet-B7 spatial branch + SWT frequency branch + 3-token transformer fusion;
 - default training data: FaceForensics++ standard four-method extracted frames;
 - current best visible FaceForensics++ result: roughly `0.906` ROC-AUC in `outputs/logs/final_20260427_0322_clean.log`;
-- Celeb-DF v2 evaluator implemented, but benchmark results pending local dataset placement.
+- Celeb-DF v2 cross-dataset evaluation completed: `0.788` ROC-AUC, `0.850` average precision, `0.799` F1 at the saved checkpoint threshold (`outputs/celeb_df_eval/metrics.json`).
 
 ## Current Strengths
 
@@ -49,9 +49,9 @@ The tail of `outputs/training_log.csv` shows high training ROC-AUC and lower val
 
 `outputs/evaluation/test_metrics.json` is a mutable output path. Later eval-only runs may overwrite a stronger report. Final experiments should write to uniquely named report directories.
 
-### 4. Celeb-DF generalization is not measured yet
+### 4. Celeb-DF generalization gap is sizeable
 
-The code path exists, but the gated dataset must be placed locally and evaluated before cross-dataset claims can be made.
+Celeb-DF v2 was evaluated with `best_iteration_swt_b7.pt` over 518 test videos at 16 frames per video with mean aggregation. The detector reaches `0.788` ROC-AUC, down from the `~0.906` ROC-AUC seen on the FaceForensics++ test split — an ~12-point drop that is consistent with the published FF++ → Celeb-DF generalization gap, but still leaves clear headroom. Specificity (`0.697`) is the weakest summary metric, indicating the FF++-trained detector is biased toward predicting "fake" on Celeb-DF reals. See `outputs/celeb_df_eval/metrics.json` for the full breakdown.
 
 ## Highest-Value Next Steps
 
@@ -85,17 +85,9 @@ Why this matters:
 - makes the final checkpoint/config/report tuple explicit;
 - gives future docs a stable source of truth.
 
-### 2. Evaluate on Celeb-DF v2
+### 2. Close the Celeb-DF v2 generalization gap
 
-Once the offline Celeb-DF v2 download is placed under `data/Celeb-DF-v2/`, run:
-
-```bash
-python scripts/download_celeb_df_test.py \
-  --out-dir data/Celeb-DF-v2 \
-  --list-only
-```
-
-Then:
+Celeb-DF v2 evaluation has been completed (see `outputs/celeb_df_eval/metrics.json` and the Weaknesses section above). The reproduction command is:
 
 ```bash
 python evaluate_celeb_df.py \
@@ -107,7 +99,12 @@ python evaluate_celeb_df.py \
   --device cuda
 ```
 
-This will answer the most important open question: how well the FaceForensics++-trained detector generalizes to a different dataset distribution.
+The headline result (`0.788` ROC-AUC, `0.799` F1, `0.697` specificity at the saved threshold of `0.64`) shows the detector ranks Celeb-DF clips well above chance but has a real-vs-fake calibration bias on this dataset — far more reals are predicted "fake" than vice versa. Promising follow-ups, in roughly increasing cost:
+
+- recalibrate the decision threshold on a Celeb-DF held-out slice (the dataset's optimal-balanced-accuracy threshold is `0.61`, slightly below the FF++-saved `0.64`, but the gain is small — the issue is ranking, not just threshold);
+- evaluate at higher frame counts (`--frames 32`) to see whether per-clip variance is hurting the real class disproportionately;
+- add Celeb-DF-style augmentations (compression, blur, identity-swap-only artifacts) to FF++ training without mixing in Celeb-DF data;
+- as a last resort, mix a small Celeb-DF v2 train slice into training and re-measure FF++ performance to ensure no regression.
 
 ### 3. Improve regularization before adding architectural complexity
 
@@ -186,11 +183,10 @@ This is more invasive and should be considered only after clean frame-level and 
 Future docs should add:
 
 - a stable experiment table tying checkpoint, config, report directory, and date;
-- Celeb-DF evaluation results after the dataset is available;
 - a model card with intended use, limitations, and misuse warnings;
 - citation/reference section for FaceForensics++, Celeb-DF, EfficientNet, SWT/wavelet detection, and deepfake detection baselines;
 - a reproducibility checklist for final experiments.
 
 ## Summary
 
-The highest-leverage next action is not a new model change. It is to lock down a clean final evaluation artifact for the current SWT+B7 checkpoint, then run Celeb-DF v2 evaluation. After that, the most promising improvement work is regularization and NeuralTextures-focused error analysis.
+The current SWT+B7 checkpoint reaches `~0.906` ROC-AUC on the FaceForensics++ test split and `0.788` ROC-AUC on the Celeb-DF v2 test split. The most promising improvement work is now regularization, NeuralTextures-focused error analysis, and closing the Celeb-DF v2 calibration gap (`0.697` specificity).

@@ -14,6 +14,7 @@ outputs/evaluation_multiframe_8/
 outputs/evaluation_video_8/
 outputs/evaluation_video_16/
 outputs/evaluation_video_16_dropout04/
+outputs/celeb_df_eval/
 outputs/logs/final_20260427_0322_clean.log
 ```
 
@@ -176,6 +177,51 @@ Observed ROC-AUC values in the available reports:
 
 These numbers show that video-level aggregation can help, but results are checkpoint- and configuration-dependent. The best observed single-frame final log still reports stronger ROC-AUC than the later video-eval artifacts listed above.
 
+## Celeb-DF v2 Cross-Dataset Evaluation
+
+`outputs/celeb_df_eval/metrics.json` records the cross-dataset run produced by `evaluate_celeb_df.py` against `best_iteration_swt_b7.pt`, with 16 frames per video and mean aggregation. This is a generalization test: the model is trained on FaceForensics++ only.
+
+Run configuration:
+
+| Setting | Value |
+|---|---|
+| Checkpoint | `outputs/checkpoints/best_iteration_swt_b7.pt` |
+| Frames per video | 16 |
+| Aggregation | mean |
+| Face detection | Haar cascade with 0.30 margin |
+| Image size | 380 |
+| Videos evaluated | 518 / 518 (no decode failures) |
+| Class balance | 178 real, 340 fake |
+
+Metrics at the saved checkpoint threshold (`0.64`):
+
+| Metric | Value |
+|---|---:|
+| ROC-AUC | 0.7878 |
+| Average precision | 0.8497 |
+| F1 | 0.7988 |
+| Precision (fake) | 0.8291 |
+| Recall (fake) | 0.7706 |
+| Specificity | 0.6966 |
+| Balanced accuracy | 0.7336 |
+| Accuracy | 0.7452 |
+| MCC | 0.4549 |
+
+Confusion matrix at the same threshold:
+
+| | Predicted real | Predicted fake |
+|---|---:|---:|
+| Actual real | 124 | 54 |
+| Actual fake | 78 | 262 |
+
+Re-optimizing the threshold on the Celeb-DF v2 test split itself moves it from `0.64` down to `0.61`, raising balanced accuracy to `0.7371` and recall to `0.8000` while specificity drops to `0.6742`. The ROC-AUC and average precision are unchanged because they are threshold-free.
+
+Interpretation:
+
+- The detector ranks Celeb-DF clips meaningfully above chance, but ROC-AUC drops roughly 12 points relative to the FaceForensics++ test split. This is the expected direction for a detector trained on a single source dataset.
+- Specificity is the weakest summary metric. The FF++-trained checkpoint is biased toward predicting "fake" on Celeb-DF reals.
+- A small threshold recalibration on Celeb-DF data closes part of the gap but does not change the underlying ranking quality.
+
 ## What Is Solid
 
 The implemented training/evaluation stack includes:
@@ -205,18 +251,18 @@ The FaceForensics++ test report uses 140 real samples and 560 fake samples in th
 
 Across available reports, `NeuralTextures` is consistently the lowest-performing method. This is the clearest method-specific weakness to target in future work.
 
-### Celeb-DF results are pending
+### Celeb-DF v2 calibration gap
 
-The repository now has a Celeb-DF evaluator, but this document should not claim Celeb-DF benchmark results until the gated dataset is placed locally and evaluation is run.
+The Celeb-DF v2 result is reported at the threshold saved with the FF++-trained checkpoint. That threshold is not optimal for Celeb-DF reals, and balanced accuracy / specificity should be read with that mismatch in mind. Re-optimized thresholds on the Celeb-DF test split itself improve balanced accuracy modestly but do not change ROC-AUC or average precision.
 
 ## Recommended Next Checks
 
 1. Run a clean eval-only pass for the intended final checkpoint and archive the report directory under a unique name.
 2. Confirm whether `best_iteration_swt_b7.pt` or `best.pt` is the intended final submitted checkpoint.
-3. Evaluate the final checkpoint on Celeb-DF v2 once the dataset is available.
-4. Compare default-threshold metrics against saved-threshold metrics before reporting a single F1/accuracy number.
-5. Continue tracking per-method results, especially `NeuralTextures`.
+3. Compare default-threshold metrics against saved-threshold metrics before reporting a single F1/accuracy number.
+4. Continue tracking per-method results, especially `NeuralTextures`.
+5. Investigate the Celeb-DF v2 specificity gap (`0.697` at the saved threshold). Candidate fixes include threshold recalibration on a Celeb-DF held-out slice, higher frame counts at inference, or compression/blur augmentation during FF++ training.
 
 ## Summary
 
-The current codebase has moved beyond the earlier sub-0.80 baseline. The strongest visible FaceForensics++ artifact reports approximately `0.906` ROC-AUC with the SWT+B7 style model, while the latest report file currently shows approximately `0.884` ROC-AUC. The model is usable, but final reporting should pin a specific checkpoint, config, and evaluation output directory to avoid ambiguity.
+The current codebase has moved beyond the earlier sub-0.80 baseline. The strongest visible FaceForensics++ artifact reports approximately `0.906` ROC-AUC with the SWT+B7 style model, while the latest report file currently shows approximately `0.884` ROC-AUC. Cross-dataset evaluation on Celeb-DF v2 with the same checkpoint reaches `0.788` ROC-AUC over 518 test videos, with specificity (`0.697`) the weakest summary metric. The model is usable, but final reporting should pin a specific checkpoint, config, and evaluation output directory to avoid ambiguity.
