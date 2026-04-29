@@ -2,573 +2,418 @@
 
 ## Scope
 
-This document describes the implemented model architecture in this repository at a layer-by-layer level. It focuses on the design currently defined in:
+This document describes the model architecture currently implemented in the repository. The active architecture is defined by:
 
-- [src/models/hsf_cvit.py](../src/models/hsf_cvit.py)
-- [src/models/efficientnet_branch.py](../src/models/efficientnet_branch.py)
-- [src/models/srm_filter.py](../src/models/srm_filter.py)
-- [src/models/cross_attention_vit.py](../src/models/cross_attention_vit.py)
+- `src/models/hsf_cvit.py`
+- `src/models/efficientnet_branch.py`
+- `src/models/swt_filter.py`
+- `src/models/cross_attention_vit.py`
+- `configs/train_config.yaml`
 
-The model is named `HSF-CVIT`, short for `Hybrid Spatial-Frequency Cross-Attention Vision Transformer`.
+The model is named `HSF-CVIT`, short for Hybrid Spatial-Frequency Cross-Attention Vision Transformer. In the current code, the name is best understood as a hybrid CNN/wavelet/transformer detector rather than a pure patch-based Vision Transformer.
 
-Despite the name, this is not a pure patch-based Vision Transformer from raw image tokens. It is a hybrid detector built from:
+## Current Architecture at a Glance
 
-- a CNN spatial encoder for semantic and appearance cues,
-- an SRM-based frequency encoder for forensic artifacts,
-- a transformer-style attention fusion head that combines the two feature streams.
+Default configuration:
 
-## 1. Architectural Intent
+```yaml
+model:
+  spatial_backbone: tf_efficientnet_b7
+  pretrained_spatial: true
+  freeze_spatial_epochs: 2
+  spatial_out_dim: 512
+  freq_out_dim: 256
+  fusion_heads: 4
+  fusion_dim: 256
+  dropout: 0.4
+data:
+  image_size: 380
+```
 
-The design tries to solve a common deepfake detection problem: manipulations can look visually plausible at the semantic level while still leaving subtle frequency-domain or high-frequency forensic traces.
+High-level flow:
 
-The architecture therefore separates the problem into two complementary views of the same input frame:
+```text
+Input RGB tensor
+├── EfficientNet spatial branch -> spatial vector
+├── SWT frequency branch        -> frequency vector
+└── 3-token transformer fusion  -> binary fake/real logit
+```
 
-- `Spatial view`: what the face and scene look like in RGB space.
-- `Frequency / forensic view`: what residual noise and high-pass artifacts suggest about manipulation.
+The model returns one raw logit per image. `torch.sigmoid(logit)` gives `P(fake)`.
 
-These views are encoded independently and fused late through attention. The late-fusion choice has two important consequences:
+## Important Implementation Status
 
-- each branch can specialize without immediately interfering with the other,
-- the fusion head can learn how much artifact evidence to use for each learned visual pattern.
+The active frequency branch is `SWTFrequencyBranch` from `src/models/swt_filter.py`. Older SRM code remains in `src/models/srm_filter.py`, but it is not used by the current top-level `HSF_CVIT` class.
 
-## 2. Top-Level Model Composition
+`build_model(train_cfg)` passes `model.srm_learnable` into `HSF_CVIT`, but the current SWT branch does not consume that flag. The flag is therefore a legacy/config-compatibility field unless the model is later changed to use a learnable SRM front-end again.
 
-At the highest level, the model takes a single RGB image tensor shaped `(B, 3, H, W)` and produces a binary classification logit shaped `(B, 1)`.
+## End-to-End Tensor Flow
 
-Default configuration from [configs/train_config.yaml](../configs/train_config.yaml):
+With the default config:
 
-- `spatial_out_dim = 512`
-- `freq_out_dim = 256`
-- `fusion_dim = 256`
-- `fusion_heads = 4`
-- `dropout = 0.3`
-- `freeze_spatial_epochs = 2`
+```text
+Input image                (B, 3, 380, 380)
+Spatial branch output      (B, 512)
+Frequency branch output    (B, 256)
+Spatial token projection   (B, 1, 256)
+Frequency token projection (B, 1, 256)
+CLS token                  (B, 1, 256)
+Fusion sequence            (B, 3, 256)
+Transformer output         (B, 3, 256)
+CLS representation         (B, 256)
+Classifier output          (B, 1)
+```
 
-End-to-end logical flow:
+The exact spatial feature resolution inside EfficientNet depends on the `timm` backbone. The branch asks `timm` for pooled features by setting `num_classes=0` and `global_pool="avg"`, so downstream code only sees the pooled vector.
 
-1. The input image is sent into the spatial branch.
-2. The same input image is sent into the frequency branch.
-3. Each branch outputs one feature vector.
-4. The fusion head converts those vectors into transformer-style tokens.
-5. Cross-attention and self-attention combine the two tokens.
-6. A final linear classifier outputs one raw logit.
+## Top-Level Module: `HSF_CVIT`
 
-## 3. End-to-End Tensor Flow
+`src/models/hsf_cvit.py` composes three modules:
 
-With the default config and a standard input size of `224 x 224`, the tensor flow is:
+```python
+self.spatial_branch = EfficientNetSpatialBranch(...)
+self.freq_branch = SWTFrequencyBranch(...)
+self.fusion_head = CrossAttentionViT(...)
+```
 
-1. Input image: `(B, 3, 224, 224)`
-2. Spatial branch output: `(B, 512)`
-3. Frequency branch output: `(B, 256)`
-4. Project both into fusion space: `(B, 1, 256)` and `(B, 1, 256)`
-5. Cross-attention output: `(B, 1, 256)`
-6. Pair refinement with self-attention over two tokens: `(B, 2, 256)`
-7. Select first token: `(B, 256)`
-8. Final classifier output: `(B, 1)`
+The forward pass:
 
-The model returns raw logits, not probabilities. During training, the logits are consumed by `BCEWithLogitsLoss` via [src/training/losses.py](../src/training/losses.py). For inference, probabilities are obtained with `torch.sigmoid(logits)`.
+1. Sends normalized input tensors to the spatial branch.
+2. Converts normalized tensors back to RGB-like `[0, 1]` image space for the frequency branch.
+3. Sends spatial and frequency feature vectors into the fusion head.
+4. Returns a raw binary logit.
 
-## 4. Spatial Branch Design
+The ImageNet denormalization step is important because the input transform normalizes frames for EfficientNet. SWT subband extraction should operate on image-space intensities, so the model registers ImageNet mean/std buffers and reconstructs the approximate RGB range before frequency analysis.
 
-Implementation: [src/models/efficientnet_branch.py](../src/models/efficientnet_branch.py)
+## Spatial Branch
 
-### 4.1 Purpose
+Implementation: `src/models/efficientnet_branch.py`
 
-The spatial branch is responsible for high-level visual understanding in RGB space. It is where the model learns semantic appearance cues such as:
+### Purpose
+
+The spatial branch learns semantic and appearance cues in RGB space:
 
 - face texture realism,
-- blending quality,
-- geometry and expression consistency,
-- identity-level or rendering-level anomalies.
+- blending artifacts visible in normal color space,
+- expression and geometry consistency,
+- identity and rendering irregularities.
 
-### 4.2 Backbone
+### Backbone
 
-The branch uses `EfficientNet-B4` from `timm`:
+The branch wraps a `timm` model. The default config selects:
 
-- model name: `efficientnet_b4`
-- `pretrained=True` by default
-- `num_classes=0`
-- `global_pool="avg"`
+```text
+tf_efficientnet_b7
+```
 
-This means the original classification head is removed and the model directly returns a pooled feature vector from the convolutional backbone.
+Key settings:
 
-The code comments indicate the backbone output dimension is `1792`.
+- `pretrained=True` by default;
+- `num_classes=0`;
+- `global_pool="avg"`;
+- output feature width read from `self.backbone.num_features`.
 
-### 4.3 Spatial Branch Layers
+For the default B7 backbone, the reference feature width is 2560.
 
-Layer sequence:
+### Projection Head
 
-1. `EfficientNet-B4 backbone`
-2. built-in global average pooling
-3. `Dropout(p=0.3)` by default
-4. `Linear(1792 -> spatial_out_dim)`
-5. `LayerNorm(spatial_out_dim)`
+The branch applies:
 
-With the default config:
-
-- backbone output: `(B, 1792)`
-- projection output: `(B, 512)`
-
-### 4.4 Why This Branch Exists
-
-EfficientNet is a strong image backbone for compact feature extraction. In this design it provides:
-
-- strong pretrained image priors from ImageNet,
-- efficient feature extraction relative to its capacity,
-- a stable semantic embedding for the downstream fusion head.
-
-This branch is the model's main source of content-aware understanding.
-
-### 4.5 Freezing Strategy
-
-The spatial backbone can be frozen and unfrozen through helper methods exposed by the branch and called by the trainer.
-
-Training behavior from [src/training/trainer.py](../src/training/trainer.py):
-
-- the EfficientNet backbone is frozen for the first `freeze_spatial_epochs`,
-- only the non-frozen parts effectively update during that warm-up,
-- after warm-up the backbone is unfrozen for full end-to-end training.
-
-Design rationale:
-
-- pretrained CNN features are already useful at initialization,
-- the frequency branch and fusion head start from scratch,
-- freezing early can reduce instability and let the new modules learn reasonable scales before full joint optimization.
-
-## 5. Frequency Branch Design
-
-Implementation: [src/models/srm_filter.py](../src/models/srm_filter.py)
-
-### 5.1 Purpose
-
-The frequency branch is designed to amplify forensic cues that may be weak in raw RGB space. It focuses on residual patterns and high-frequency inconsistencies that can be introduced by synthesis, blending, compression, warping, and frame-level editing artifacts.
-
-### 5.2 SRM Filter Bank
-
-The branch starts with three classical fixed SRM high-pass kernels built in `_build_srm_kernels()`:
-
-- kernel 1: second-order residual
-- kernel 2: Laplacian-style residual
-- kernel 3: average residual pattern
-
-These kernels are stored as non-trainable weights inside `SRMConv2d`.
-
-### 5.3 Grouped Convolution Design
-
-The SRM layer applies each kernel independently to each RGB channel:
-
-- input channels: `3`
-- kernels per channel: `3`
-- total output channels: `9`
-- grouped convolution uses `groups=3`
-
-Shape transformation:
-
-- input: `(B, 3, H, W)`
-- SRM output: `(B, 9, H, W)`
-
-This design keeps channel-specific residual responses separate at the filtering stage.
-
-### 5.4 SRM Activation Clamp
-
-Immediately after SRM filtering, the code applies:
-
-`torch.tanh(noise * 10.0)`
-
-This has two purposes:
-
-- scale residual responses before nonlinearity,
-- clamp extreme values in a way that matches common SRM-style preprocessing.
-
-That step is important because raw high-pass responses can be noisy and unstable if passed directly into later trainable layers.
-
-### 5.5 Trainable Residual Encoder
-
-After the fixed filter bank, the branch uses a lightweight residual CNN encoder:
-
-1. `Conv2d(9 -> 64, kernel_size=3, padding=1, bias=False)`
-2. `BatchNorm2d(64)`
-3. `ReLU`
-4. `_ResBlock(64 -> 128, stride=2)`
-5. `_ResBlock(128 -> 256, stride=2)`
-6. `_ResBlock(256 -> 256, stride=2)`
-7. `AdaptiveAvgPool2d(1)`
-
-Projection head:
-
-1. `Flatten`
-2. `Linear(256 -> freq_out_dim)`
-3. `LayerNorm(freq_out_dim)`
+```text
+Dropout(p=dropout)
+Linear(backbone_out_dim -> spatial_out_dim)
+LayerNorm(spatial_out_dim)
+```
 
 With the default config:
 
-- pooled encoder output: `(B, 256, 1, 1)`
-- projected frequency vector: `(B, 256)`
+```text
+Linear(2560 -> 512)
+```
 
-### 5.6 Residual Block Internals
+### Freeze/Unfreeze Behavior
 
-Each `_ResBlock` contains:
+The branch exposes:
 
-1. `Conv2d(in_ch -> out_ch, 3x3, stride=stride, padding=1, bias=False)`
-2. `BatchNorm2d(out_ch)`
-3. `ReLU`
-4. `Conv2d(out_ch -> out_ch, 3x3, padding=1, bias=False)`
-5. `BatchNorm2d(out_ch)`
-6. skip path:
-   if shape changes, `Conv2d(1x1, stride=stride) + BatchNorm2d`
-7. residual addition
-8. final `ReLU`
+- `freeze()`
+- `unfreeze()`
+- `is_frozen`
 
-This gives the branch a compact ResNet-like structure suitable for refining forensic residual maps after the fixed SRM preprocessing.
+The trainer uses these helpers to freeze the EfficientNet backbone for the first `freeze_spatial_epochs`. This freezes backbone parameters, not the projection head. The projection head, SWT branch, and fusion head remain trainable.
 
-### 5.7 Why This Branch Exists
+## Frequency Branch
 
-A standard RGB backbone can miss subtle manipulation traces when they do not strongly affect semantic appearance. The SRM branch exists to push the model toward:
+Implementation: `src/models/swt_filter.py`
 
-- local residual artifacts,
-- unnatural high-frequency statistics,
-- compression and resampling patterns,
-- synthesis fingerprints that survive even when faces look visually plausible.
+### Purpose
 
-In short, the spatial branch asks "does this image look fake?" while the frequency branch asks "does this image behave like manipulated content under residual analysis?"
+The frequency branch captures forensic cues that may be weak in normal RGB space:
 
-## 6. Fusion Head Design
+- high-frequency synthesis artifacts,
+- local edge/noise irregularities,
+- texture inconsistencies,
+- manipulation traces that survive visually plausible rendering.
 
-Implementation: [src/models/cross_attention_vit.py](../src/models/cross_attention_vit.py)
+### SWT Front-End
 
-### 6.1 Purpose
+The current branch uses a two-level stationary wavelet transform with fixed Haar filters.
 
-The fusion head combines the two branch outputs using transformer-style attention. It is the component that turns two independent embeddings into one decision-ready representation.
+Input:
 
-This head is "ViT-like" because it works with learned tokens and multi-head attention, but it is much smaller than a full Vision Transformer:
+```text
+(B, 3, H, W)
+```
 
-- there are only two logical tokens,
-- tokens come from branch embeddings rather than image patches,
-- the attention module is used for modality fusion rather than full image encoding.
+First, RGB is converted to grayscale:
 
-### 6.2 Input Tokens
+```text
+gray = 0.299 R + 0.587 G + 0.114 B
+```
 
-The fusion head receives:
+For each SWT level, the branch computes:
 
-- `spatial_feat`: `(B, spatial_dim)` which is `(B, 512)` by default
-- `freq_feat`: `(B, freq_dim)` which is `(B, 256)` by default
+- `LH`: horizontal/row high-pass with column low-pass response;
+- `HL`: row low-pass with column high-pass response;
+- `HH`: diagonal high-frequency response.
 
-These are projected into a shared fusion space:
+The implementation skips LL subbands because the spatial branch already models low-frequency semantic content.
+
+With two levels:
+
+```text
+LH1, HL1, HH1, LH2, HL2, HH2 -> 6 maps
+```
+
+Output after concatenation:
+
+```text
+(B, 6, H, W)
+```
+
+The SWT is implemented in pure PyTorch with fixed registered buffers for Haar kernels. There is no external wavelet dependency.
+
+### Frequency Encoder
+
+After SWT extraction, the branch applies:
+
+```text
+Conv2d(6 -> 64, 3x3) + BatchNorm + ReLU
+ResBlock(64 -> 128, stride=2)
+ResBlock(128 -> 256, stride=2)
+ResBlock(256 -> 256, stride=2)
+AdaptiveAvgPool2d(1)
+Flatten
+Linear(256 -> freq_out_dim)
+LayerNorm(freq_out_dim)
+```
+
+With the default config:
+
+```text
+freq_out_dim = 256
+```
+
+### Residual Block
+
+Each residual block contains:
+
+```text
+Conv2d -> BatchNorm -> ReLU
+Conv2d -> BatchNorm
+optional 1x1 shortcut projection
+residual add
+ReLU
+```
+
+This gives the frequency branch enough trainable capacity to learn combinations of fixed wavelet subbands without making the wavelet filters themselves trainable.
+
+## Fusion Head
+
+Implementation: `src/models/cross_attention_vit.py`
+
+### Purpose
+
+The fusion head combines the spatial vector and frequency vector into one decision-ready representation. It uses transformer encoder layers over a very small token sequence.
+
+### Token Construction
+
+The fusion head learns:
 
 - `proj_spatial: Linear(spatial_dim -> fusion_dim)`
 - `proj_freq: Linear(freq_dim -> fusion_dim)`
+- `cls_token: (1, 1, fusion_dim)`
+- `pos_embed: (1, 3, fusion_dim)`
 
-Then each is unsqueezed into one token:
+The sequence is:
 
-- spatial token `q`: `(B, 1, fusion_dim)`
-- frequency token `kv`: `(B, 1, fusion_dim)`
+```text
+[CLS] + spatial token + frequency token
+```
 
-### 6.3 Learnable Positional Embeddings
+Shape:
 
-The module adds two learnable parameters:
-
-- `pos_spatial`: `(1, 1, fusion_dim)`
-- `pos_freq`: `(1, 1, fusion_dim)`
-
-Even though the sequence length is tiny, these embeddings give the model explicit token identity and help distinguish the roles of the two streams in attention.
-
-### 6.4 Cross-Attention Block
-
-The first attention stage is:
-
-- query = spatial token
-- key = frequency token
-- value = frequency token
-
-This is implemented with:
-
-- `nn.MultiheadAttention(embed_dim=fusion_dim, num_heads=fusion_heads, batch_first=True)`
-
-Default attention settings:
-
-- `fusion_dim = 256`
-- `fusion_heads = 4`
-- head dimension = `256 / 4 = 64`
-
-Interpretation:
-
-- the spatial token asks what forensic evidence is relevant,
-- the frequency token provides the artifact-based context,
-- the result is a frequency-informed spatial representation.
-
-This choice makes the fusion directional. The implemented design does not use symmetric bidirectional cross-attention.
-
-### 6.5 Residual and Normalization After Cross-Attention
-
-After cross-attention, the code performs:
-
-1. residual addition with the original spatial token,
-2. `LayerNorm`
-
-Formally:
-
-`q = norm1(q + attn_out)`
-
-This preserves the original spatial signal while allowing the frequency branch to modify it.
-
-### 6.6 MLP Block
-
-The updated token then passes through a feed-forward block:
-
-1. `Linear(fusion_dim -> fusion_dim * 2)`
-2. `GELU`
-3. `Dropout`
-4. `Linear(fusion_dim * 2 -> fusion_dim)`
-5. residual addition
-6. `LayerNorm`
-
-With the default config, this becomes:
-
-- `Linear(256 -> 512)`
-- `GELU`
-- `Dropout(0.3)`
-- `Linear(512 -> 256)`
-
-This block increases representational capacity after attention mixing.
-
-### 6.7 Pairwise Self-Attention Refinement
-
-A second attention stage is applied after concatenating:
-
-- the updated spatial token `q`,
-- the projected frequency token `kv`
-
-This creates a 2-token sequence:
-
-- `pair = torch.cat([q, kv], dim=1)` giving `(B, 2, fusion_dim)`
-
-The module then runs self-attention across both tokens:
-
-- `self_attn(pair, pair, pair)`
-
-This step lets the model refine the joint representation after the initial directional fusion. In practice it gives the model one extra interaction stage:
-
-- cross-attention injects frequency evidence into the spatial token,
-- self-attention lets the two-token pair settle into a jointly contextualized state.
-
-### 6.8 Final Token Selection and Classifier
-
-After self-attention:
-
-- the first token is selected as the final representation,
-- dropout is applied,
-- a linear layer maps to one scalar logit.
-
-Classifier sequence:
-
-1. select `pair[:, 0, :]`
-2. `Dropout`
-3. `Linear(fusion_dim -> 1)`
+```text
+(B, 3, fusion_dim)
+```
 
 With defaults:
 
-- classifier input: `(B, 256)`
-- classifier output: `(B, 1)`
+```text
+(B, 3, 256)
+```
 
-The first token is effectively treated like a task token or CLS-style summary token, although it originates from the spatial stream rather than from an explicitly learned standalone `[CLS]` embedding.
+### Transformer Encoder
 
-## 7. Mermaid Design Chart
+The current fusion module uses:
+
+```python
+nn.TransformerEncoderLayer(
+    d_model=fusion_dim,
+    nhead=fusion_heads,
+    dim_feedforward=fusion_dim * 4,
+    dropout=dropout,
+    activation="gelu",
+    batch_first=True,
+    norm_first=True,
+)
+```
+
+and wraps it in:
+
+```text
+2-layer nn.TransformerEncoder + final LayerNorm
+```
+
+With `fusion_dim=256` and `fusion_heads=4`, each head has width 64.
+
+### Classifier
+
+After the transformer encoder:
+
+```text
+encoded[:, 0, :] -> Dropout -> Linear(256 -> 1)
+```
+
+The first token is the learned `[CLS]` token. This is the final summary representation used for classification.
+
+## Mermaid Architecture Chart
 
 ```mermaid
 flowchart TD
-    A[Input RGB Frame\nB x 3 x 224 x 224]
+    A[Input RGB Frame\nB x 3 x 380 x 380]
 
     A --> S1[Spatial Branch]
-    A --> F1[Frequency Branch]
-
-    S1 --> S2[EfficientNet-B4 Backbone\npretrained ImageNet\nnum_classes=0\nglobal avg pool]
+    S1 --> S2[tf_efficientnet_b7\nImageNet pretrained\nnum_classes=0\nglobal_pool=avg]
     S2 --> S3[Dropout]
-    S3 --> S4[Linear 1792 -> 512]
+    S3 --> S4[Linear 2560 -> 512]
     S4 --> S5[LayerNorm]
-    S5 --> ST[Spatial Feature Token Source\nB x 512]
+    S5 --> ST[Spatial Feature\nB x 512]
 
-    F1 --> F2[Fixed SRM Filter Bank\n3 kernels x 3 RGB channels]
-    F2 --> F3[Tanh clamp after x10 scaling]
-    F3 --> F4[Conv 9 -> 64 + BN + ReLU]
-    F4 --> F5[ResBlock 64 -> 128 stride 2]
-    F5 --> F6[ResBlock 128 -> 256 stride 2]
-    F6 --> F7[ResBlock 256 -> 256 stride 2]
-    F7 --> F8[AdaptiveAvgPool2d 1x1]
-    F8 --> F9[Flatten + Linear 256 -> 256 + LayerNorm]
-    F9 --> FT[Frequency Feature Token Source\nB x 256]
+    A --> D1[Denormalize ImageNet tensor\nback to RGB-like 0..1]
+    D1 --> F1[SWT Frequency Branch]
+    F1 --> F2[RGB to grayscale]
+    F2 --> F3[Haar SWT level 1\nLH1 HL1 HH1]
+    F2 --> F4[Haar SWT level 2\nLH2 HL2 HH2]
+    F3 --> F5[Concat 6 high-frequency maps]
+    F4 --> F5
+    F5 --> F6[Conv 6 -> 64 + BN + ReLU]
+    F6 --> F7[ResBlock 64 -> 128]
+    F7 --> F8[ResBlock 128 -> 256]
+    F8 --> F9[ResBlock 256 -> 256]
+    F9 --> F10[AdaptiveAvgPool + Linear -> 256 + LayerNorm]
+    F10 --> FT[Frequency Feature\nB x 256]
 
-    ST --> P1[Project Spatial\nLinear 512 -> 256\nAdd spatial position embedding]
-    FT --> P2[Project Frequency\nLinear 256 -> 256\nAdd frequency position embedding]
-
-    P1 --> CA[Cross-Attention\nQ = spatial token\nK,V = frequency token]
-    P2 --> CA
-
-    CA --> N1[Residual + LayerNorm]
-    N1 --> MLP[MLP\n256 -> 512 -> 256\nGELU + Dropout]
-    MLP --> N2[Residual + LayerNorm]
-
-    N2 --> CAT[Concatenate updated spatial token\nwith frequency token]
-    P2 --> CAT
-
-    CAT --> SA[Self-Attention over 2-token pair]
-    SA --> N3[Residual + LayerNorm]
-    N3 --> CLS[Select first token]
-    CLS --> D1[Dropout]
-    D1 --> OUT[Linear 256 -> 1\nRaw Fake/Real Logit]
+    ST --> P1[Project spatial\n512 -> 256]
+    FT --> P2[Project frequency\n256 -> 256]
+    P1 --> TOK[CLS + spatial + frequency\nAdd learned position embedding]
+    P2 --> TOK
+    TOK --> ENC[2-layer TransformerEncoder\n4 heads, GELU FFN]
+    ENC --> CLS[Select CLS token]
+    CLS --> OUT[Dropout + Linear 256 -> 1\nRaw logit]
 ```
 
-## 8. Design Rationale by Module
+## Training-Time Interactions
 
-### 8.1 Why use a CNN for the spatial branch instead of a patch ViT backbone
+### Loss
 
-This implementation favors a pretrained CNN backbone because:
+Training uses `BCEWithLogitsLoss` through `src/training/losses.py`, with:
 
-- EfficientNet-B4 is compact and mature,
-- transfer learning from ImageNet is straightforward,
-- the project remains easier to train on moderate hardware,
-- the architectural novelty is focused on hybrid fusion rather than replacing every stage with transformers.
+- optional label smoothing;
+- optional positive-class weighting through `pos_weight`.
 
-### 8.2 Why use fixed SRM kernels instead of learning the first frequency layer
+The default config currently sets:
 
-Using fixed high-pass filters injects prior forensic knowledge directly into the model. That can be useful because:
+```yaml
+label_smoothing: 0.10
+pos_weight: null
+```
 
-- deepfake artifacts often appear as subtle residual inconsistencies,
-- a fixed forensic preprocessing layer can stabilize what the frequency branch sees,
-- the trainable encoder can focus on combining residual patterns rather than rediscovering classical high-pass filters from scratch.
+With smoothing `0.10`, hard labels are softened around the binary targets. This can reduce overconfidence and improve robustness to noisy labels.
 
-### 8.3 Why late fusion instead of early concatenation
+### Optimization
 
-The implemented design waits until each branch has produced a compact embedding before combining them. This is attractive because:
+Default training settings:
 
-- branch-specific inductive biases are preserved longer,
-- tensor sizes remain manageable,
-- fusion logic stays modular,
-- it is easier to ablate or replace one branch without redesigning the whole model.
+```yaml
+optimizer: adamw
+lr: 1.0e-4
+weight_decay: 5.0e-4
+warmup_epochs: 8
+lr_schedule: cosine
+gradient_clip: 1.0
+amp: true
+```
 
-### 8.4 Why directional cross-attention from spatial to frequency
+The trainer uses linear warm-up before the configured main scheduler when applicable.
 
-The code uses:
+### Evaluation Thresholding
 
-- spatial token as query,
-- frequency token as key and value.
+Validation metrics are computed at the default threshold and, when enabled, over a threshold sweep:
 
-This suggests the classifier is anchored in semantic understanding first, and forensic evidence is used as conditioning information rather than as the dominant representation. It is a meaningful design choice:
+```yaml
+optimize_threshold: true
+threshold_metric: balanced_accuracy
+threshold_min: 0.05
+threshold_max: 0.95
+threshold_step: 0.01
+```
 
-- semantic interpretation remains the main scaffold,
-- artifact evidence is injected where needed,
-- the final prediction still comes from the updated spatial token.
+When validation ROC-AUC improves, the current best threshold is saved in the checkpoint as `best_threshold`.
 
-## 9. Training-Time Design Interactions
+## Strengths of the Current Design
 
-Although the trainer is separate from the model, several training choices are clearly part of the architecture's intended operation.
+- Strong ImageNet-pretrained spatial backbone.
+- Explicit high-frequency wavelet pathway.
+- Small fusion transformer that is easy to inspect and ablate.
+- Input normalization is handled correctly for both EfficientNet and wavelet analysis.
+- Modular structure: branch and fusion components can be swapped independently.
+- Works with frame-level training and video-level probability aggregation at evaluation/inference time.
 
-### 9.1 Loss
+## Limitations
 
-From [src/training/losses.py](../src/training/losses.py), training uses binary cross-entropy with logits, optional label smoothing, and optional class weighting.
+### No temporal modeling inside the model
 
-Default smoothing:
+The model classifies frames independently. Video-level inference samples frames and aggregates probabilities, but there is no recurrent, 3D convolutional, or temporal-transformer component.
 
-- `label_smoothing = 0.05`
+### Fusion token count is intentionally small
 
-Smoothed targets become:
+The fusion head operates on three tokens, not image patches. It is transformer-style fusion, not full image-token ViT modeling.
 
-- real `0` becomes `0.025`
-- fake `1` becomes `0.975`
+### SWT filters are fixed
 
-Default class weighting:
+The Haar SWT filters are not learned. This gives a stable forensic prior, but it may miss manipulation traces that are better represented by learned or adaptive filters.
 
-- `pos_weight = 1.3`
+### Config compatibility fields exist
 
-This multiplies the BCE loss gradient for the fake (positive) class by 1.3, nudging the model toward higher fake probabilities and keeping the calibrated decision threshold near 0.5. The label smoothing reduces overconfidence and improves robustness to noisy labels.
+The `srm_learnable` config field is present in the extended config and accepted by `HSF_CVIT`, but it has no effect on the active SWT branch.
 
-### 9.2 Optimizer
+## Summary
 
-Default optimizer from config:
+The current HSF-CVIT implementation is a practical hybrid detector:
 
-- `AdamW`
-- learning rate `3e-4`
-- weight decay `1e-4`
+- `tf_efficientnet_b7` learns visual and semantic evidence;
+- SWT subbands expose multi-scale high-frequency forensic evidence;
+- a compact transformer encoder fuses `[CLS]`, spatial, and frequency tokens;
+- the final classifier outputs a single fake/real logit.
 
-This is a reasonable fit for a mixed architecture containing:
-
-- pretrained CNN weights,
-- trainable residual convolution blocks,
-- small transformer-style fusion modules.
-
-### 9.3 Learning-Rate Schedule
-
-Default schedule:
-
-- `warmup_epochs = 5`
-- `lr_schedule = cosine`
-
-The scheduler implementation uses linear warm-up followed by cosine annealing. This pairs well with:
-
-- frozen early spatial training,
-- newly initialized fusion layers,
-- mixed-capacity modules that may otherwise optimize at different speeds.
-
-### 9.4 Mixed Precision
-
-When CUDA is available and AMP is enabled:
-
-- autocast is used,
-- GradScaler is used,
-- gradient clipping is applied after unscaling.
-
-This improves throughput while still protecting training stability.
-
-## 10. What Makes This Model Distinct
-
-The implementation is distinctive not because each individual component is novel on its own, but because of how the components are combined:
-
-- pretrained semantic CNN branch,
-- fixed forensic preprocessing branch,
-- compact attention-based fusion,
-- training schedule that protects the pretrained backbone early.
-
-This creates a detector that is more structured than a single-stream classifier and more approachable than a large multi-stage transformer system.
-
-## 11. Strengths of the Current Design
-
-- Strong inductive bias for forensic artifact detection through SRM filters.
-- Good transfer-learning starting point through pretrained EfficientNet-B4.
-- Small and interpretable fusion head.
-- Modular design that supports ablations branch by branch.
-- Practical default dimensions for moderate-scale experimentation.
-
-## 12. Limitations and Implementation Notes
-
-### 12.1 Only one token per branch
-
-The fusion head operates on one spatial token and one frequency token. This keeps the design simple, but it also means:
-
-- attention is not modeling patch-level interactions,
-- spatial localization is compressed before fusion,
-- the transformer portion is lightweight rather than deeply expressive.
-
-### 12.2 Frequency branch uses fixed handcrafted priors
-
-The SRM stage may improve robustness to some artifacts, but it can also bias the detector toward known residual patterns and may not be optimal for all manipulation families.
-
-### 12.3 Final decision is anchored to the spatial token
-
-The classifier uses the first token after refinement. That means the final representation is still primarily organized around the spatial stream, even though it has been conditioned on frequency evidence.
-
-### 12.4 Frame-level processing only
-
-The dataset returns single frames (or averaged frame stacks for multi-frame settings). The model has no temporal component — frames from the same video are processed independently. Video-level inference improves accuracy by averaging per-frame probabilities, but temporal consistency signals are not exploited architecturally.
-
-## 13. Summary
-
-`HSF-CVIT` is best understood as a hybrid deepfake detector with three stages:
-
-1. `Spatial encoding` with EfficientNet-B4 to capture semantic appearance cues.
-2. `Frequency encoding` with fixed SRM filters plus a residual CNN to capture forensic artifacts.
-3. `Attention-based fusion` where the spatial representation queries the frequency representation and then produces a final binary logit.
-
-This gives the project a clear research-friendly structure:
-
-- easy to explain,
-- easy to ablate,
-- strong enough to demonstrate modern hybrid deepfake detection ideas without becoming overly complex.
+This architecture is suitable for FaceForensics++ training, checkpoint evaluation, and cross-dataset inference experiments on Celeb-DF v2.

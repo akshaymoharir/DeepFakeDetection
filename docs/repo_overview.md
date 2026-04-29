@@ -2,211 +2,204 @@
 
 ## Purpose
 
-This repository is code for a deepfake detection algorithm, including data preparation, model training, validation, evaluation, and wrapper scripts around the core model workflow. The overall goal is to provide a practical experimentation environment for studying deepfake detection with a model that is still approachable for beginners.
+This repository implements and evaluates a deepfake detection algorithm centered on `HSF-CVIT`: a hybrid spatial-frequency detector with transformer-style fusion. The project contains the full practical workflow around the model:
 
-At its core, the repository is organized around a hybrid deepfake detector named `HSF-CVIT`, short for Hybrid Spatial-Frequency Cross-Attention Vision Transformer. The design combines:
+- dataset download and frame extraction utilities,
+- configurable training and validation,
+- checkpointing and test-set reporting,
+- image/video inference,
+- cross-dataset evaluation on Celeb-DF v2.
 
-- a spatial branch that learns appearance cues from RGB frames,
-- a frequency branch that highlights forensic artifacts and manipulation noise,
-- a transformer-style attention fusion block that combines both signals for final prediction.
+The default training path is FaceForensics++ frame-level training. Celeb-DF v2 is currently supported as a cross-dataset evaluation target through `evaluate_celeb_df.py`.
 
-This makes the project a good fit for introductory research and course work: it is more advanced than a plain CNN baseline, but still modular enough that individual components can be replaced and compared in a controlled way.
+## Current Implementation Snapshot
 
-## Project Objective
+The code currently implements:
 
-The main objective of the repository is to support deepfake detection experiments in a configurable and reproducible way. Rather than hard-coding one fixed pipeline, the repo is structured so different settings can be studied with minimal code changes.
+- `tf_efficientnet_b7` spatial backbone through `timm`;
+- a two-level Haar stationary wavelet transform frequency branch (`SWTFrequencyBranch`);
+- a compact 3-token transformer encoder fusion head (`[CLS]`, spatial token, frequency token);
+- binary output logits interpreted as `P(fake)` after sigmoid;
+- FaceForensics++ dataloaders using extracted frames and official split files in the default config;
+- weighted sampling for class imbalance during training;
+- deterministic validation/test frame selection;
+- optional true video-level test evaluation through `train.py --video-eval`;
+- a consumer inference CLI through `predict.py`;
+- a Celeb-DF v2 test-set evaluator through `evaluate_celeb_df.py`.
 
-In practical terms, the repository aims to support:
-
-- training a deepfake detector from prepared frame data,
-- validating the model during training using standard binary classification metrics,
-- evaluating a final checkpoint on a held-out test split,
-- preparing and auditing datasets before experiments begin,
-- swapping or tuning model and training settings through YAML configuration files.
-
-This makes the repository useful both as:
-
-- a beginner-friendly starting point for deepfake detection research, and
-- a framework for small ablation studies on architecture and training choices.
+Important implementation note: older SRM-related code still exists in `src/models/srm_filter.py`, but the active top-level model in `src/models/hsf_cvit.py` imports and uses `SWTFrequencyBranch` from `src/models/swt_filter.py`.
 
 ## High-Level Pipeline
 
-The intended workflow of the repository is:
+The normal project workflow is:
 
-1. Download or place raw datasets locally.
-2. Extract a fixed number of frames from each video.
-3. Organize frames by class and clip.
-4. Build train, validation, and test data loaders.
-5. Train the hybrid detector.
-6. Track validation performance and save checkpoints.
-7. Evaluate the best model on a held-out test set.
+1. Place raw datasets under `data/`.
+2. Extract uniformly sampled frames with `scripts/extract_frames.py`.
+3. Train with `train.py` using `configs/train_config.yaml`.
+4. Save best and periodic checkpoints under `outputs/checkpoints/`.
+5. Evaluate on the FaceForensics++ test split with `train.py --eval-only`.
+6. Run single-file inference with `predict.py`.
+7. Optionally evaluate cross-dataset generalization on Celeb-DF v2 with `evaluate_celeb_df.py`.
 
-At a high level, the repository breaks down into four layers:
+## Main Entry Points
 
-- data acquisition and frame extraction,
-- configuration-driven experiment setup,
-- model definition and training engine,
-- evaluation and experiment logging.
+### `train.py`
+
+Main training and FaceForensics++ evaluation entrypoint. It:
+
+- loads `configs/train_config.yaml`;
+- loads the dataset config referenced by `data.config`;
+- builds train/validation/test dataloaders;
+- builds the HSF-CVIT model;
+- trains with AMP when CUDA is available;
+- saves checkpoints;
+- writes TensorBoard, CSV, and evaluation reports.
+
+It also supports:
+
+- `--dummy` for no-I/O smoke tests;
+- `--resume` for checkpoint resume;
+- `--eval-only` for test evaluation;
+- `--video-eval` for clip-level evaluation by averaging per-frame probabilities.
+
+### `predict.py`
+
+Consumer inference CLI for single images or videos. It loads a checkpoint and config, then returns a real/fake label, fake probability, threshold, and video frame statistics when applicable.
+
+### `evaluate_celeb_df.py`
+
+Cross-dataset evaluator for Celeb-DF v2. It consumes raw Celeb-DF videos listed in `List_of_testing_videos.txt`, runs `DeepFakeDetector.predict_video`, and writes:
+
+- `outputs/celeb_df_eval/per_video.csv`
+- `outputs/celeb_df_eval/metrics.json`
+
+### `scripts/extract_frames.py`
+
+Dataset preprocessing script for FaceForensics++ and Celeb-DF style video folders. It extracts a fixed number of frames per video, optionally resizing frames before saving.
+
+## Repository Layout
+
+```text
+configs/                    YAML experiment and dataset settings
+configs/ffpp_splits/         Official FF++ train/val/test pair splits
+scripts/                    Dataset download, extraction, audit, plotting utilities
+src/data/                   Dataset classes, transforms, dataloader factory
+src/models/                 Spatial branch, SWT branch, fusion head, top-level model
+src/training/               Losses, metrics, trainer, checkpoint/report logic
+src/inference/              DeepFakeDetector inference wrapper
+src/utils/                  Frame decoding, seeding, script logging helpers
+outputs/checkpoints/        Saved model checkpoints
+outputs/evaluation*/        Test reports from train.py evaluation
+outputs/celeb_df_eval/      Celeb-DF evaluator outputs
+data/                       Local datasets and extracted frames
+docs/                       Project documentation
+```
 
 ## Dataset Support
 
-The repository is oriented around two commonly used deepfake datasets:
-
-- FaceForensics++
-- Celeb-DF v2
-
 ### FaceForensics++
 
-The FaceForensics++ configuration supports:
+The default training configuration uses the FaceForensics++ standard profile:
 
-- real videos from YouTube originals,
-- multiple manipulation methods — the standard four are `Deepfakes`, `Face2Face`, `FaceSwap`, and `NeuralTextures`; the extended config also includes `FaceShifter` and `DeepFakeDetection`,
-- configurable compression settings such as `c23`,
-- official pair-based split assignment using `configs/ffpp_splits/` JSON files.
+- real source: `original_sequences/youtube`;
+- fake methods: `Deepfakes`, `Face2Face`, `FaceSwap`, `NeuralTextures`;
+- compression setting documented as `c23`;
+- extracted frame output: `data/frames_ffpp_standard`;
+- split mode: official split JSON files in `configs/ffpp_splits/`.
 
-The frame extraction flow saves frames into class-specific folders such as:
+The extended config includes additional methods/sources:
 
-- `data/frames_ffpp_standard/real/...`
-- `data/frames_ffpp_standard/Deepfakes/...`
-- `data/frames_ffpp_standard/Face2Face/...`
-
-This layout is intended to make downstream dataset loading straightforward.
+- `FaceShifter`;
+- `DeepFakeDetection`;
+- `original_sequences/actors`;
+- output under `data/frames_ffpp_extended`.
 
 ### Celeb-DF v2
 
-The config also includes paths for:
+Celeb-DF v2 is not merged into the default training dataloader. It is configured for preprocessing and is now supported for evaluation through:
 
-- `Celeb-real`
-- `YouTube-real`
-- `Celeb-synthesis`
+- `scripts/download_celeb_df_test.py`
+- `evaluate_celeb_df.py`
 
-and a provided test list file for test-set handling.
+Expected structure:
 
-### Dummy Data Workflow
+```text
+data/Celeb-DF-v2/
+├── Celeb-real/
+├── YouTube-real/
+├── Celeb-synthesis/
+└── List_of_testing_videos.txt
+```
 
-For development and smoke testing, the repository includes a synthetic data generator. This is useful when the real datasets are unavailable or when the training pipeline needs to be checked without downloading large video collections.
+Celeb-DF labels are inverted internally by the evaluator because the dataset list uses `1=real` and `0=fake`, while this project uses `1=fake`.
 
-## Model Architecture
+## Model Summary
 
-The implemented model is a hybrid spatial-frequency detector with transformer-style fusion.
+The active HSF-CVIT model consists of:
 
-### 1. Spatial Branch
+1. `EfficientNetSpatialBranch`
+   - `timm` backbone, default `tf_efficientnet_b7`;
+   - ImageNet-pretrained by default;
+   - projects pooled features to `spatial_out_dim=512`.
 
-The spatial branch uses `EfficientNet-B4` through `timm`. It extracts high-level appearance features from RGB face frames and projects them into a configurable embedding dimension.
+2. `SWTFrequencyBranch`
+   - converts RGB to grayscale;
+   - computes two levels of fixed Haar SWT high-frequency subbands;
+   - concatenates `LH`, `HL`, and `HH` subbands from each level, giving 6 maps;
+   - encodes them with a small residual CNN;
+   - projects to `freq_out_dim=256`.
 
-This branch represents the more conventional visual understanding part of the detector:
+3. `CrossAttentionViT`
+   - projects spatial and frequency vectors to `fusion_dim=256`;
+   - constructs `[CLS] + spatial + frequency`;
+   - applies a 2-layer `nn.TransformerEncoder`;
+   - classifies the `[CLS]` representation with a linear layer.
 
-- facial texture,
-- blending artifacts,
-- expression inconsistencies,
-- identity and appearance-level cues.
+The model returns raw logits. Metrics and inference apply sigmoid to obtain `P(fake)`.
 
-### 2. Frequency Branch
+## Training and Evaluation Behavior
 
-The frequency branch applies fixed SRM high-pass filters, then sends the result through a lightweight residual encoder.
+The trainer implements:
 
-This branch is meant to capture forensic traces that may be less obvious in ordinary RGB space, such as:
+- `BCEWithLogitsLoss` with optional label smoothing and optional `pos_weight`;
+- AdamW, Adam, or SGD;
+- linear warm-up plus cosine/step/plateau scheduling;
+- spatial-backbone freezing for early epochs;
+- gradient clipping;
+- CUDA AMP through `torch.amp`;
+- validation-threshold optimization over a configurable grid;
+- best checkpoint saving by validation ROC-AUC;
+- periodic checkpoint saving and pruning;
+- early stopping;
+- per-method test reports.
 
-- resampling artifacts,
-- blending noise,
-- local high-frequency inconsistencies,
-- manipulation fingerprints.
+Evaluation reports from `train.py` are written as:
 
-### 3. Transformer-Style Fusion
+```text
+outputs/evaluation/
+├── test_metrics.json
+├── test_confusion_matrix.csv
+├── test_per_method.csv
+└── test_predictions.csv
+```
 
-The fusion head uses cross-attention and self-attention to combine the spatial and frequency embeddings. The spatial token attends to the frequency token, then a small transformer-like refinement block produces the final representation used for classification.
+## Current Practical Status
 
-Because of this attention-based fusion stage, the repository can reasonably be described as transformer-based, but not as a pure Vision Transformer pipeline from raw image patches. It is better described as a hybrid model:
+The repository is usable end to end for:
 
-- CNN backbone for spatial learning,
-- SRM residual encoder for forensic features,
-- transformer-style attention for multimodal fusion.
+- FaceForensics++ frame extraction;
+- FaceForensics++ training;
+- FaceForensics++ checkpoint evaluation;
+- single image/video inference;
+- Celeb-DF v2 evaluation once the gated dataset is placed locally.
 
-## Training and Evaluation Flow
+The strongest run artifacts currently present are associated with the SWT+B7 iteration. A final log (`outputs/logs/final_20260427_0322_clean.log`) reports FaceForensics++ test ROC-AUC around `0.906`, while the latest `outputs/evaluation/test_metrics.json` may reflect a later evaluation command and should be treated as the most recent report file rather than necessarily the best historical model.
 
-The training entrypoint is [`train.py`](/home/akshay/CSI-6550-advanced-visual-computing/DeepFakeDetection/train.py). It is designed to:
+## Documentation Map
 
-- load YAML configuration,
-- apply command-line overrides,
-- build data loaders,
-- instantiate the model,
-- run training and validation,
-- save best and periodic checkpoints,
-- evaluate the best model on the test set.
-
-The training engine includes:
-
-- mixed precision when CUDA is available,
-- optimizer selection from config,
-- cosine, step, or plateau learning-rate schedules,
-- warm-up epochs,
-- gradient clipping,
-- early stopping based on validation ROC-AUC,
-- TensorBoard and CSV logging.
-
-Evaluation uses standard binary classification metrics:
-
-- ROC-AUC
-- F1
-- precision
-- recall
-- accuracy
-
-## Repository Structure
-
-The repository is broadly divided as follows:
-
-- `configs/`: experiment and dataset configuration, FF++ official split JSON files
-- `scripts/`: dataset download, extraction, audit, and synthetic data utilities
-- `src/data/`: dataset class (`FaceForensicsDataset`), augmentation pipelines, dataloader factory
-- `src/models/`: model components (HSF-CVIT, spatial branch, frequency branch, fusion head)
-- `src/training/`: loss, metrics, and trainer
-- `src/inference/`: `DeepFakeDetector` inference API with face detection support
-- `src/utils/`: shared helpers (seeding, logging, frame extraction)
-- `train.py`: main training entrypoint
-- `predict.py`: command-line inference for single images or video files
-
-## Configurability
-
-One of the strongest aspects of this repo is that most important settings are externalized into YAML files. That supports easier experimentation without editing the training code directly.
-
-Examples of configurable behavior include:
-
-- model dimensions,
-- number of fusion heads,
-- dropout,
-- fake methods used for training,
-- frames sampled per clip,
-- optimizer type,
-- learning rate,
-- label smoothing,
-- checkpoint locations,
-- logging destinations.
-
-This is important for deepfake detection research, where comparing models and training settings is often more valuable than building a single rigid pipeline.
-
-## Current State and Practical Notes
-
-The repository is a complete, end-to-end deepfake detection framework. All major components are implemented and integrated:
-
-- `src/data/dataset.py` provides `FaceForensicsDataset` and `build_dataloaders`, including `train_items_per_clip` expansion, `WeightedRandomSampler` balance, and deterministic eval-mode frame selection.
-- `src/data/transforms.py` provides train and val/test augmentation pipelines, including JPEG compression augmentation (quality 60–95, p=0.3).
-- `src/training/losses.py` wires `pos_weight` from the training config into the BCE loss.
-- `src/inference/detector.py` provides `DeepFakeDetector` for image and video inference with face detection.
-- `predict.py` provides command-line inference.
-
-## Summary
-
-This repository should be understood as a configurable deepfake detection experimentation framework centered on a hybrid beginner-friendly model. It combines:
-
-- dataset preparation utilities,
-- a modular training and evaluation pipeline,
-- a hybrid CNN plus frequency plus attention architecture,
-- configuration-driven experimentation support.
-
-The repo is especially well suited for:
-
-- studying deepfake detection methods,
-- running controlled training experiments,
-- comparing architecture or training variants,
-- learning how modern deepfake detectors are organized end to end.
+- `docs/UserGuide.md`: consumer-facing run guide.
+- `docs/model_architecture_design.md`: current model architecture.
+- `docs/dataset_configuration_report.md`: dataset config and active data paths.
+- `docs/training_run_summary.md`: observed run artifacts and evaluation status.
+- `docs/repo_technical_reference.md`: implementation-level reference.
+- `docs/improvement_notes.md`: roadmap and known next steps.

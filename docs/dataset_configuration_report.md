@@ -1,218 +1,327 @@
 # Dataset Configuration Report
 
-## High-Level Summary
+## Purpose
 
-This repository defines a broader deepfake data setup than the trainer currently uses.
+This report explains what dataset-related configuration exists in the repository and which parts are actively used by the implemented training and evaluation code.
 
-- The broader dataset definition lives in `configs/dataset_config.yaml` and includes both FaceForensics++ and Celeb-DF v2.
-- The current `train.py` pipeline does **not** build a mixed FaceForensics++ plus Celeb-DF training set.
-- With `configs/train_config.yaml`, `train.py` builds dataloaders only from **FaceForensics++ extracted frames** under `data/frames_ffpp_standard`.
-- The active training subset uses:
-  - `real`
-  - `Deepfakes`
-  - `Face2Face`
-  - `FaceSwap`
-  - `NeuralTextures`
-- Split assignment uses **official FF++ pair-based JSON files** (`configs/ffpp_splits/{train,val,test}.json`) rather than numeric index ranges.
-- A broader extended setup also exists in `configs/train_config_extended.yaml` which includes all six methods: `Deepfakes`, `Face2Face`, `FaceSwap`, `NeuralTextures`, `FaceShifter`, `DeepFakeDetection`.
+The important distinction is:
 
-In short, the repo is configured around a **larger dataset universe**, but the **current trainer run path is a FaceForensics++-only subset** using the four standard FF++ c23 methods.
+- `train.py` currently trains and evaluates through the FaceForensics++ extracted-frame dataloader.
+- Celeb-DF v2 is configured and supported for preprocessing/evaluation, but it is not merged into the default `train.py` training dataset.
+- `evaluate_celeb_df.py` is the active Celeb-DF v2 evaluation path.
 
-## Files That Control the Dataset
+## Relevant Files
 
-The dataset behavior is spread across four main places:
+```text
+configs/train_config.yaml
+configs/train_config_extended.yaml
+configs/dataset_config.yaml
+configs/dataset_config_extended.yaml
+configs/ffpp_splits/train.json
+configs/ffpp_splits/val.json
+configs/ffpp_splits/test.json
+src/data/dataset.py
+src/data/transforms.py
+scripts/extract_frames.py
+scripts/download_FaceForensicsPP.py
+scripts/download_celeb_df_test.py
+evaluate_celeb_df.py
+```
 
-- `train.py`
-- `configs/train_config.yaml`
-- `configs/dataset_config.yaml`
-- `src/data/dataset.py`
+## Default Training Data Flow
 
-The flow is:
+When running:
+
+```bash
+python train.py --config configs/train_config.yaml
+```
+
+the code path is:
 
 1. `train.py` loads `configs/train_config.yaml`.
-2. That config points to `configs/dataset_config.yaml` through `data.config`.
-3. `train.py` then calls `build_dataloaders(...)` from `src/data/dataset.py`.
-4. `build_dataloaders(...)` only instantiates `FaceForensicsDataset` for real training.
-5. The dataset loader reads from the extracted frame directory defined at `faceforensics.frame_extraction.output_dir`, which is currently `data/frames_ffpp_standard`.
+2. It reads `train_cfg["data"]["config"]`.
+3. The default value points to `configs/dataset_config.yaml`.
+4. `train.py` loads that dataset config.
+5. `build_dataloaders(...)` in `src/data/dataset.py` builds FaceForensics++ train/val/test dataloaders.
 
-That means `dataset_config.yaml` contains more than the current trainer actually consumes. The FaceForensics++ section is active for training; the Celeb-DF section is currently only a repository-level dataset definition and preprocessing target.
+The default trainer does not build a mixed FaceForensics++ + Celeb-DF training set.
 
-## Complete Larger Dataset Defined in the Repo
+## Default FaceForensics++ Configuration
 
-The complete larger dataset definition in `configs/dataset_config.yaml` covers two benchmarks.
+From `configs/dataset_config.yaml`:
 
-### 1. FaceForensics++
+```yaml
+faceforensics:
+  profile: ffpp_standard
+  root_dir: data
+  compression: c23
+  split_mode: official
+  split_files:
+    train: configs/ffpp_splits/train.json
+    val: configs/ffpp_splits/val.json
+    test: configs/ffpp_splits/test.json
+  manipulation_methods:
+    - Deepfakes
+    - Face2Face
+    - FaceSwap
+    - NeuralTextures
+  frame_extraction:
+    output_dir: data/frames_ffpp_standard
+```
 
-Configured FaceForensics++ settings:
+From `configs/train_config.yaml`:
 
-- root directory: `data`
-- compression level: `c23`
-- split mode: `official` — uses official pair-based JSON files in `configs/ffpp_splits/`
-- manipulation methods:
-  - `Deepfakes`
-  - `Face2Face`
-  - `FaceSwap`
-  - `NeuralTextures`
-- real sources:
-  - `original_sequences/youtube`
-- extracted frame output: `data/frames_ffpp_standard`
-- extraction cap: `32` frames per video
+```yaml
+data:
+  config: configs/dataset_config.yaml
+  frames_per_clip: 1
+  train_items_per_clip: 8
+  image_size: 380
+  methods:
+    - Deepfakes
+    - Face2Face
+    - FaceSwap
+    - NeuralTextures
+  real_dir: real
+```
 
-Configured split ranges (used as fallback for numeric-mode):
+Therefore the active default training set is:
 
-- train: video indices `[0, 720)`
-- val: video indices `[720, 860)`
-- test: video indices `[860, 1000)`
+```text
+data/frames_ffpp_standard/
+├── real/
+├── Deepfakes/
+├── Face2Face/
+├── FaceSwap/
+└── NeuralTextures/
+```
 
-Split assignment detail:
+Each subdirectory should contain one directory per video/clip, and each clip directory should contain extracted image frames.
 
-- The active `split_mode: official` uses the official FF++ pair JSON files. Each clip pair is assigned to exactly one split based on the pair membership tables.
-- The numeric fallback (hash-based for actor IDs, index-range for youtube IDs) is available when `split_mode: numeric`.
+## FaceForensics++ Split Behavior
 
-### 2. Celeb-DF v2
+The default config uses:
 
-Configured Celeb-DF v2 settings:
+```yaml
+split_mode: official
+```
 
-- root directory: `data/Celeb-DF-v2`
-- real directories:
-  - `Celeb-real`
-  - `YouTube-real`
-- fake directory: `Celeb-synthesis`
-- test list: `List_of_testing_videos.txt`
-- extracted frame output: `data/Celeb-DF-v2/frames`
-- extraction cap: `32` frames per video
+In this mode, `src/data/dataset.py` loads the official split JSON files and assigns:
 
-### What "Complete Larger Dataset" Means Here
+- real videos by video ID;
+- fake videos by source-target pair IDs.
 
-At the repository level, the project is designed to support:
+If the official split files are missing or malformed, the dataloader raises an error. This is intentional because the default profile is meant to reproduce the standard FaceForensics++ split behavior.
 
-- FaceForensics++ preprocessing and training
-- Celeb-DF preprocessing and exploration
-- dummy data smoke tests
+The extended dataset config uses:
 
-But the current trainer implementation does not merge these into a single training dataset. The larger dataset is therefore best understood as the **full data scope the repo knows about**, not the exact dataset `train.py` currently trains on.
+```yaml
+split_mode: numeric
+```
 
-## Smaller Currently Configured Dataset Used by `train.py`
+That mode falls back to numeric ID ranges and deterministic hashing for actor-style IDs that do not map cleanly to the standard 0-999 YouTube ID ranges.
 
-When `train.py` runs with the default config `configs/train_config.yaml`, it uses:
+## Frame-Level Sampling Behavior
 
-- dataset config: `configs/dataset_config.yaml`
-- extracted frame root: `data/frames_ffpp_standard`
-- image size: `224`
-- `frames_per_clip: 1` — one frame sampled per training item (averaging multiple frames washes artifacts)
-- `train_items_per_clip: 8` — each clip directory is repeated 8× in the training sample list, so the model sees 8 independently-sampled random frames per video per epoch
-- real class directory: `real`
-- fake methods:
-  - `Deepfakes`
-  - `Face2Face`
-  - `FaceSwap`
-  - `NeuralTextures`
-- `balance_strategy: weighted_sampler` — enforces 50/50 class balance per mini-batch
+`FaceForensicsDataset` samples frames from extracted frame folders.
 
-The loader is clip-based, not frame-list-based:
+Training behavior:
 
-- each clip is stored as its own directory of extracted images
-- each dataset item corresponds to one (clip, frame) sample
-- training dataset length = number of usable clip directories × `train_items_per_clip`
-- validation and test datasets are not expanded; each clip appears once with a fixed center frame
+- `frames_per_clip` defaults to `1`.
+- a frame is randomly sampled for each item;
+- `train_items_per_clip=8` repeats each clip entry during training so an epoch can see more independently sampled frames per clip;
+- train transforms are stochastic.
 
-This means training dataset length is measured in **expanded sample entries** (clips × 8), while val/test length is in **usable clip directories**.
+Validation/test behavior:
 
-## Effective Current Dataset Size
+- `evaluation.eval_frames_per_clip` defaults to `1`;
+- `evaluation.eval_frame_strategy` defaults to `center`;
+- deterministic sampling is enabled by default;
+- no weighted sampler is used for validation/test.
 
-The exact usable clip counts can be obtained by running `scripts/audit_faceforensics.py` against `data/frames_ffpp_standard`.
+If `--video-eval` is used with `train.py --eval-only`, validation/test datasets can return a frame stack shaped like:
 
-The current config uses four standard FF++ c23 methods (Deepfakes, Face2Face, FaceSwap, NeuralTextures) with official split files. Based on the standard FF++ c23 distribution:
+```text
+(frames_per_clip, C, H, W)
+```
 
-- train split is approximately 720 source videos × 4 methods + corresponding real clips
-- val split is approximately 140 source videos × 4 methods + real
-- test split is approximately 140 source videos × 4 methods + real
+The trainer then runs the frames independently and averages their probabilities per clip.
 
-Training effective dataset size = clip count × `train_items_per_clip` (8), giving approximately 28,800 training items per epoch for a typical 3,600-clip raw training set.
+## Class Balance Handling
 
-Note: the older dataset analysis in `docs/training_run_summary.md` was based on a different configuration using `FaceShifter` and `DeepFakeDetection` methods from `data/frames`. Those numbers no longer apply to the current setup.
+The default config enables:
 
-## Class Balance of the Current Training Dataset
+```yaml
+balance_strategy: weighted_sampler
+```
 
-With four fake methods and one real class, the raw clip ratio is approximately 4:1 fake-heavy.
+When this is active, `build_dataloaders(...)` computes class weights from the train dataset samples and uses `WeightedRandomSampler` with replacement. This reduces the effect of the typical FaceForensics++ fake-heavy class imbalance during training.
 
-The training pipeline mitigates this with:
+The validation and test loaders preserve their natural class distributions.
 
-- `balance_strategy: weighted_sampler` — `WeightedRandomSampler` enforces 50/50 real/fake per mini-batch
-- `pos_weight: 1.3` — applies a 1.3× gradient multiplier to the fake class in the BCE loss, nudging output probabilities higher and keeping the calibrated threshold near 0.5
+## Transform Pipeline
 
-Val and test loaders use the natural imbalance. AUC is therefore the primary headline metric; accuracy and F1 should be interpreted relative to the optimized threshold reported alongside them.
+`src/data/transforms.py` defines transforms.
 
-## Extracted Frame Scale on Disk
+Training transforms:
 
-The extracted frames live in `data/frames_ffpp_standard/`. Each method subdirectory has one folder per source video, containing up to 32 uniformly-sampled JPEG frames.
+```text
+Resize(image_size + 16)
+RandomCrop(image_size)
+RandomHorizontalFlip
+ColorJitter
+RandomRotation
+RandomApply(GaussianBlur)
+RandomJpegCompression(quality 60-95, p=0.3)
+ToTensor
+ImageNet Normalize
+```
 
-Run `scripts/audit_faceforensics.py` against `data/frames_ffpp_standard` to get current clip and frame counts.
+Validation/test transforms:
 
-Important note:
+```text
+Resize(image_size)
+CenterCrop(image_size)
+ToTensor
+ImageNet Normalize
+```
 
-- The filesystem may contain hidden directories (e.g., `._033_097` from macOS Finder).
-- The loader and audit logic skip entries whose names start with `.`.
+The current default image size for training is `380`.
 
-## Why Some Clips Are Excluded
+## Extended FaceForensics++ Profile
 
-With `split_mode: official`, only clips whose pair ID appears in `configs/ffpp_splits/train.json`, `val.json`, or `test.json` are assigned to a split. Clips absent from all three files are excluded.
+`configs/train_config_extended.yaml` and `configs/dataset_config_extended.yaml` define a broader experiment profile.
 
-This is the safest policy: it strictly follows the official benchmark split rather than inferring membership from numeric indices.
+Extended fake methods:
 
-## Broader Extended Dataset Config
+```text
+Deepfakes
+Face2Face
+FaceSwap
+NeuralTextures
+FaceShifter
+DeepFakeDetection
+```
 
-The repository also includes `configs/train_config_extended.yaml`, which trains on all six available FF++ methods:
+Extended real sources:
 
-- `Deepfakes`, `Face2Face`, `FaceSwap`, `NeuralTextures`, `FaceShifter`, `DeepFakeDetection`
+```text
+original_sequences/youtube
+original_sequences/actors
+```
 
-This uses `configs/dataset_config_extended.yaml` and writes to separate output directories (`outputs/checkpoints_extended`, etc.). Use it for broader cross-method generalization experiments.
+Extended extracted frame output:
 
-## Practical Interpretation
+```text
+data/frames_ffpp_extended
+```
 
-There are three different dataset scopes in this repo:
+Extended training outputs:
 
-### 1. Full repository dataset scope
+```text
+outputs/checkpoints_extended
+outputs/evaluation_extended
+outputs/runs_extended
+outputs/training_log_extended.csv
+```
 
-- FaceForensics++ (four standard c23 methods by default, six with extended config)
-- Celeb-DF v2 (configured for preprocessing, not wired into training)
-- In-memory dummy data for smoke tests (`--dummy` flag)
+Use the extended profile when the extra source folders and methods have been downloaded and extracted.
 
-### 2. Current default training dataset
+## Celeb-DF v2 Configuration
 
-- FaceForensics++ only
-- extracted frames in `data/frames_ffpp_standard`
-- real plus four fake methods (Deepfakes, Face2Face, FaceSwap, NeuralTextures)
-- official pair-based split assignment
+Both dataset configs include:
 
-### 3. Extended training dataset
+```yaml
+celeb_df:
+  root_dir: data/Celeb-DF-v2
+  real_dirs:
+    - Celeb-real
+    - YouTube-real
+  fake_dir: Celeb-synthesis
+  test_list: List_of_testing_videos.txt
+  frame_extraction:
+    output_dir: data/Celeb-DF-v2/frames
+```
 
-- FaceForensics++ with all six available methods
-- separate outputs and config file (`configs/train_config_extended.yaml`)
+This config supports exploration and frame extraction. It does not mean `train.py` trains on Celeb-DF by default.
 
-If the question is "what does the repo support?", the answer is the larger multi-dataset definition across both dataset configs.
+## Active Celeb-DF Evaluation Path
 
-If the question is "what does `train.py` train on right now with the default config?", the answer is the four-method FaceForensics++ extracted-frame subset using the official splits.
+Celeb-DF v2 evaluation is handled by `evaluate_celeb_df.py`.
 
-## Key Takeaways
+Expected local layout:
 
-- The active training pipeline uses FaceForensics++ c23 with official pair-based splits.
-- Active fake methods: Deepfakes, Face2Face, FaceSwap, NeuralTextures.
-- Frames extracted to `data/frames_ffpp_standard`; each clip has up to 32 frames.
-- `train_items_per_clip: 8` multiplies training dataset size 8× by drawing independent random frames per pass.
-- `WeightedRandomSampler` + `pos_weight: 1.3` address class imbalance.
-- Celeb-DF v2 is configured for preprocessing but not included in the default training path.
+```text
+data/Celeb-DF-v2/
+├── Celeb-real/
+├── YouTube-real/
+├── Celeb-synthesis/
+└── List_of_testing_videos.txt
+```
 
-## Source Basis for This Report
+The evaluator:
 
-This report was derived from:
+- parses `List_of_testing_videos.txt`;
+- converts Celeb-DF labels from `1=real, 0=fake` to project labels `0=real, 1=fake`;
+- loads a checkpoint through `DeepFakeDetector`;
+- samples frames directly from raw videos;
+- writes per-video predictions and metrics.
 
-- `train.py`
-- `configs/train_config.yaml`
-- `configs/train_config_extended.yaml`
-- `configs/dataset_config.yaml`
-- `configs/ffpp_splits/train.json`, `val.json`, `test.json`
-- `src/data/dataset.py`
-- `scripts/extract_frames.py`
-- `scripts/audit_faceforensics.py`
-- the current local `data/frames_ffpp_standard` directory
+Output:
+
+```text
+outputs/celeb_df_eval/
+├── per_video.csv
+└── metrics.json
+```
+
+## Celeb-DF Download Helper
+
+`scripts/download_celeb_df_test.py` is a helper for gated Celeb-DF access. It cannot bypass dataset access requirements.
+
+It can:
+
+- verify and count entries in `List_of_testing_videos.txt`;
+- use authorized Google Drive folder URLs with `gdown`;
+- try to download only videos referenced by the test list;
+- fall back to full-folder download plus pruning.
+
+For offline/manual download, place the dataset under `data/Celeb-DF-v2/` and use:
+
+```bash
+python scripts/download_celeb_df_test.py --out-dir data/Celeb-DF-v2 --list-only
+```
+
+as a parser/check step.
+
+## Dummy Data Mode
+
+`train.py --dummy` bypasses real dataset loading and uses `DummyFaceForensicsDataset`.
+
+Dummy sizes:
+
+```text
+train: 512
+val:   128
+test:  128
+```
+
+This is useful for validating the training loop, model construction, logging, and checkpoint mechanics without dataset I/O. It is not meaningful for model quality.
+
+## Practical Status
+
+Current dataset support by workflow:
+
+| Workflow | Status | Entrypoint |
+|---|---:|---|
+| FaceForensics++ download | Implemented | `scripts/download_FaceForensicsPP.py` |
+| FaceForensics++ frame extraction | Implemented | `scripts/extract_frames.py` |
+| FaceForensics++ training | Implemented | `train.py` |
+| FaceForensics++ test evaluation | Implemented | `train.py --eval-only` |
+| Celeb-DF v2 frame extraction | Configured | `scripts/extract_frames.py --dataset celeb-df` |
+| Celeb-DF v2 test evaluation | Implemented | `evaluate_celeb_df.py` |
+| Mixed FF++ + Celeb-DF training | Not implemented | N/A |
+
+## Summary
+
+With the default config, `train.py` trains on the four-method FaceForensics++ standard extracted-frame dataset using official splits. Celeb-DF v2 is available as a configured dataset target and a dedicated cross-dataset evaluator, but it is not part of the default training dataloader.

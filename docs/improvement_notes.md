@@ -1,129 +1,196 @@
-> **Temporary working doc.** Captures the assessment of the 2026-04-26 training
-> run and a prioritized roadmap for pushing past AUC ~0.80. Delete or merge into
-> the technical reference once the items below are landed.
+# HSF-CVIT Improvement Notes
 
-# HSF-CVIT Improvement Roadmap
+## Purpose
 
-## Current State (2026-04-26)
+This document records practical next steps for improving the implemented project. It reflects the current codebase state:
 
-Run: 32 epochs (early-stopped, patience 15), best epoch 17.
+- active model: EfficientNet-B7 spatial branch + SWT frequency branch + 3-token transformer fusion;
+- default training data: FaceForensics++ standard four-method extracted frames;
+- current best visible FaceForensics++ result: roughly `0.906` ROC-AUC in `outputs/logs/final_20260427_0322_clean.log`;
+- Celeb-DF v2 evaluator implemented, but benchmark results pending local dataset placement.
 
-| Metric                     | Value  |
-|----------------------------|--------|
-| Test ROC-AUC               | 0.795  |
-| Test Average Precision     | 0.937  |
-| Test F1 @ thr=0.68         | 0.729  |
-| Test F1 @ thr=0.50         | 0.754  |
-| Test Recall @ thr=0.50     | 0.636  |
-| Test Precision @ thr=0.50  | 0.927  |
-| Best val AUC               | 0.793  |
-| Best val threshold (T*)    | 0.68   |
+## Current Strengths
 
-Per-method test AUC: Deepfakes 0.876 > Face2Face 0.811 > FaceSwap 0.778 > NeuralTextures 0.714.
+The project already has a strong engineering baseline:
 
-## Diagnosis
+- modular model branches and fusion head;
+- config-driven model/training settings;
+- official FaceForensics++ split support;
+- weighted sampling for class imbalance;
+- deterministic validation/test sampling;
+- threshold optimization and saved checkpoint thresholds;
+- per-method reports;
+- video-level test evaluation option;
+- image/video inference API and CLI;
+- Celeb-DF v2 evaluation script.
 
-1. **Heavy overfitting.** Train AUC reaches 0.967 while val plateaus at 0.79
-   (gap ≈ 0.18). The model memorizes training-frame artifacts past epoch ~17.
-2. **Calibration drift in cosine tail.** Val loss grows from 0.78 → 1.55 while
-   AUC stays roughly flat — overconfident wrong predictions.
-3. **Threshold optimizer is noisy.** T* swings between 0.10 and 0.92 across
-   epochs; val=700 is small for a 1% step grid. Default 0.50 actually beats
-   the optimized threshold on F1 (0.754 vs 0.729).
-4. **NeuralTextures is the bottleneck.** Without it, average AUC ≈ 0.82.
-   Fixed SRM kernels target blending/resampling artifacts; texture-synthesis
-   manipulations live in a different signal regime.
-5. **Below FF++ literature.** Xception, EfficientNet-B7, F3-Net all hit
-   ~0.95 AUC on FF++ c23. We are ~15 pp behind state-of-the-art.
+The move from the older SRM/B4-style baseline to the current SWT/B7-style implementation appears to have produced a meaningful improvement in FaceForensics++ test ROC-AUC.
 
-## What is solid
+## Current Weaknesses
 
-- Engineering: official splits, deterministic eval, threshold optimization,
-  per-method reports, video-level eval, inference API, AMP, gradient clip,
-  weighted sampler, pos_weight calibration, reproducibility seeded.
-- Architecture is principled and well-documented.
-- The training loop is not the bottleneck.
+### 1. NeuralTextures is still the hardest default method
 
-## Improvement Roadmap (highest leverage first)
+Available reports consistently show `NeuralTextures` as the weakest method. In the strongest visible final log:
 
-### 1. Learnable SRM front-end  *(in progress)*
+```text
+Deepfakes      AUC 0.9474
+Face2Face      AUC 0.9253
+FaceSwap       AUC 0.9152
+NeuralTextures AUC 0.8368
+```
 
-**Problem.** `SRMConv2d` registers the three classical kernels as buffers, so
-they never receive gradients. NeuralTextures artifacts sit in a different
-frequency band than the high-pass priors capture.
+This suggests the detector handles identity-swap/blending artifacts better than texture-rendering artifacts.
 
-**Plan.** Initialize the 9-channel filter bank with the classical SRM kernels
-(2nd-order residual, 2D Laplacian, 5×5 average residual) but expose them as
-`nn.Parameter` so the optimizer can adapt them. Add a config flag
-`model.srm_learnable` so this can be toggled for ablation.
+### 2. Train/validation gap remains visible
 
-**Cost.** Half a day. Adds 9 × 5 × 5 = 225 trainable params (negligible).
+The tail of `outputs/training_log.csv` shows high training ROC-AUC and lower validation ROC-AUC. That is expected for this problem, but it still signals overfitting pressure.
 
-**Expected impact.** +1 to +3 pp AUC, mostly on NeuralTextures.
+### 3. Report artifacts can be overwritten
 
-### 2. Stronger augmentation: CutMix / face-region cutout
+`outputs/evaluation/test_metrics.json` is a mutable output path. Later eval-only runs may overwrite a stronger report. Final experiments should write to uniquely named report directories.
 
-**Problem.** Train AUC 0.97, val 0.79 — the model is overfitting. Current
-augmentation is colour jitter, rotation, blur, JPEG compression — all
-appearance-level.
+### 4. Celeb-DF generalization is not measured yet
 
-**Plan.** Add CutMix (or face-region cutout, à la FaceShifter regularization)
-between mini-batches. This forces the model to use multiple regions of the
-face rather than over-relying on a single artifact pocket.
+The code path exists, but the gated dataset must be placed locally and evaluated before cross-dataset claims can be made.
 
-**Cost.** Half a day. Just a `BatchCollator` or training-loop augmentation
-hook.
+## Highest-Value Next Steps
 
-**Expected impact.** +1 to +2 pp AUC, narrows the train/val gap.
+### 1. Run and archive a final clean evaluation
 
-### 3. Heavier backbone: EfficientNet-B7 or Xception
+Before changing model code, pin the current baseline.
 
-**Problem.** EfficientNet-B4 (18.5M params) is the lightest backbone the FF++
-literature uses. Xception is the canonical FF++ baseline.
+Recommended command shape:
 
-**Plan.** Swap `efficientnet_b4` → `xception` (28M params) or
-`tf_efficientnet_b7` (66M params) via `timm`.  The branch wrapper interface
-already isolates the backbone — only `EfficientNetSpatialBranch` needs
-touching.
+```bash
+python train.py \
+  --config configs/train_config.yaml \
+  --resume outputs/checkpoints/best_iteration_swt_b7.pt \
+  --eval-only \
+  --report-dir outputs/evaluation_final_swt_b7 \
+  --device cuda
+```
 
-**Cost.** Half a day for the swap. Training time grows ~2-3×.
+Then preserve:
 
-**Expected impact.** +3 to +5 pp AUC.
+```text
+outputs/evaluation_final_swt_b7/test_metrics.json
+outputs/evaluation_final_swt_b7/test_per_method.csv
+outputs/evaluation_final_swt_b7/test_predictions.csv
+outputs/evaluation_final_swt_b7/test_confusion_matrix.csv
+```
 
-### 4. Patch-token ViT fusion
+Why this matters:
 
-**Problem.** Current fusion compresses each branch to one vector before
-attention. Two tokens cannot represent spatial localization, so the
-"transformer" portion is barely doing transformer-style work.
+- avoids confusion between best historical log and latest report file;
+- makes the final checkpoint/config/report tuple explicit;
+- gives future docs a stable source of truth.
 
-**Plan.** Replace single-token fusion with patch tokens — keep the spatial
-feature map from EfficientNet (B, 1792, 7, 7) → 49 patch tokens, plus the
-frequency branch as a parallel sequence. Run a 2-layer cross-attention ViT
-across both sequences.
+### 2. Evaluate on Celeb-DF v2
 
-**Cost.** 1-2 days. Touches `cross_attention_vit.py` and the spatial branch
-output interface.
+Once the offline Celeb-DF v2 download is placed under `data/Celeb-DF-v2/`, run:
 
-**Expected impact.** +2 to +4 pp AUC, plus better localization signal.
+```bash
+python scripts/download_celeb_df_test.py \
+  --out-dir data/Celeb-DF-v2 \
+  --list-only
+```
 
-### 5. Stronger regularization
+Then:
 
-**Problem.** Same as #2 — train AUC saturates near 1.0 while val stagnates.
+```bash
+python evaluate_celeb_df.py \
+  --checkpoint outputs/checkpoints/best_iteration_swt_b7.pt \
+  --config configs/train_config.yaml \
+  --dataset-root data/Celeb-DF-v2 \
+  --frames 16 \
+  --aggregation mean \
+  --device cuda
+```
 
-**Plan.** Drop the LR to 1e-4 once warmup ends, add `drop_path=0.2` to the
-EfficientNet stem, raise dropout 0.3 → 0.4 in the fusion head. Already
-have `weight_decay=1e-4`; no change needed there.
+This will answer the most important open question: how well the FaceForensics++-trained detector generalizes to a different dataset distribution.
 
-**Cost.** A few config tweaks.
+### 3. Improve regularization before adding architectural complexity
 
-**Expected impact.** +0.5 to +1 pp AUC, mostly via reduced overfitting.
+The current model already has a large B7 backbone and strong training-set fit. Reasonable next experiments:
 
-## Recommendation for course deliverable
+- tune `dropout` around `0.4`;
+- compare `weight_decay` values around `5e-4`;
+- compare `label_smoothing` values around `0.05`, `0.10`, and `0.15`;
+- try smaller `train_items_per_clip` values if epochs are seeing too many near-duplicate frame variants;
+- consider early stopping/report selection by a metric that reflects the final objective.
 
-1. Land item #1 (learnable SRM) — small, low-risk, targets the weakest
-   per-method result.
-2. Run one training cycle to measure impact.
-3. If time permits, also land #2 (CutMix). #3 and #4 are larger commitments.
+These are lower-risk than changing model interfaces.
 
-After #1 + #2 we should expect AUC in the 0.82-0.85 range and a meaningfully
-narrower train/val gap.
+### 4. Add stronger occlusion or region-level augmentation
+
+Current train transforms include crop, flip, color jitter, rotation, blur, and JPEG compression. A useful next augmentation experiment would be:
+
+- random erasing/cutout on face crops;
+- region dropout;
+- CutMix-style mixing if implemented carefully for binary labels.
+
+Goal:
+
+- reduce reliance on a small artifact region;
+- improve robustness to local occlusion and compression differences;
+- narrow the train/validation gap.
+
+### 5. Investigate NeuralTextures-specific failure cases
+
+Recommended analysis:
+
+- sort `test_predictions.csv` by false negatives for `NeuralTextures`;
+- inspect high-confidence misses;
+- compare frame quality and compression against better-performing methods;
+- check whether misses cluster by identity, source video, or frame region.
+
+This should happen before adding large model features. The failure mode may be data distribution, not architecture capacity.
+
+## Architecture Ideas for Later
+
+These are larger changes and should wait until the baseline is archived.
+
+### 1. Patch-level fusion
+
+Current fusion uses three tokens:
+
+```text
+[CLS], spatial, frequency
+```
+
+A richer design could preserve spatial feature maps or frequency feature maps and build patch tokens before fusion. This may help localization-sensitive artifacts but requires changing branch interfaces.
+
+### 2. Learnable or hybrid frequency filters
+
+The current SWT front-end uses fixed Haar filters. Later experiments could try:
+
+- learnable high-pass filters initialized from forensic kernels;
+- learnable wavelet-like filters;
+- concatenating SWT maps with RGB-derived residual maps.
+
+This may help NeuralTextures if fixed Haar subbands are not expressive enough.
+
+### 3. Temporal modeling
+
+The current model is frame-level. Video inference averages sampled frame probabilities. A temporal model could use:
+
+- per-frame embedding aggregation;
+- temporal transformer over frame embeddings;
+- simple statistics over frame probabilities and embeddings;
+- 3D CNN blocks for short clips.
+
+This is more invasive and should be considered only after clean frame-level and video-aggregation baselines are documented.
+
+## Documentation Improvements Still Needed
+
+Future docs should add:
+
+- a stable experiment table tying checkpoint, config, report directory, and date;
+- Celeb-DF evaluation results after the dataset is available;
+- a model card with intended use, limitations, and misuse warnings;
+- citation/reference section for FaceForensics++, Celeb-DF, EfficientNet, SWT/wavelet detection, and deepfake detection baselines;
+- a reproducibility checklist for final experiments.
+
+## Summary
+
+The highest-leverage next action is not a new model change. It is to lock down a clean final evaluation artifact for the current SWT+B7 checkpoint, then run Celeb-DF v2 evaluation. After that, the most promising improvement work is regularization and NeuralTextures-focused error analysis.
